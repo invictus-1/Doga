@@ -300,6 +300,7 @@ end
 ---------------------------------------------------------------------------
 local render -- forward
 local open_settings -- forward (Settings page, defined further down)
+local hotkey_label = function(id) return '' end -- forward: current key for an action, as shown to people
 local function osd(icon_name, lead, value, meta, opts)
   st.osd = { icon = icon_name, lead = lead, value = value, meta = meta, bar = opts and opts.bar, off = opts and opts.off }
   st.osd_until = mp.get_time() + 1.2
@@ -436,15 +437,19 @@ end
 local function chip(id, right_x, cy, icon_name, label, key)
   local s = st.s
   local tw = text_w(label, 12 * s)
-  local w = 8 * s + 16 * s + 4 * s + tw + 6 * s + 14 * s + 8 * s
+  -- the key box fits whatever key is assigned (and disappears if none is)
+  local kw = (key and key ~= '') and math.max(14 * s, text_w(key, 10 * s, true) + 6 * s) or 0
+  local w = 8 * s + 16 * s + 4 * s + tw + (kw > 0 and (6 * s + kw) or 0) + 8 * s
   local x, y, h = right_x - w, cy - 14 * s, 28 * s
   local hov = within(x, y, w, h) or st.menu == id
   fill(cut(x, y, w, h, 4 * s), hov and T.line or T.surface2)
   icon(icon_name, x + 8 * s, cy - 8 * s, 16 * s, T.muted)
   txt(x + 28 * s, cy, label, { size = 12, weight = 600, color = label == 'Off' and T.muted or T.ink })
-  local kx = x + 28 * s + tw + 6 * s
-  stroke(rect(kx, cy - 7 * s, 14 * s, 14 * s), T.lineStrong, 1 * s)
-  txt(kx + 7 * s, cy + 0.5 * s, key, { size = 10, mono = true, an = 5, color = T.muted })
+  if kw > 0 then
+    local kx = x + 28 * s + tw + 6 * s
+    stroke(rect(kx, cy - 7 * s, kw, 14 * s), T.lineStrong, 1 * s)
+    txt(kx + kw / 2, cy + 0.5 * s, key, { size = 10, mono = true, an = 5, color = T.muted })
+  end
   zone(id, x, y, w, h)
   return w
 end
@@ -608,15 +613,15 @@ local function draw_bar(vw)
   rx = rx - 40 * s; ibtn('playlist', rx, ry, 'list', { on = st.panel })
   rx = rx - 40 * s; ibtn('info', rx, ry, 'info', { on = st.info })
   rx = rx - 8 * s
-  local w2 = chip('chip-sub', rx, cy, 'subs', chip_label('sub'), 'V')
+  local w2 = chip('chip-sub', rx, cy, 'subs', chip_label('sub'), hotkey_label('sub'))
   rx = rx - w2 - 8 * s
-  chip('chip-audio', rx, cy, 'audio', chip_label('audio'), 'B')
+  chip('chip-audio', rx, cy, 'audio', chip_label('audio'), hotkey_label('audio'))
 end
 
 local function draw_menu(vw)
   local s = st.s
-  local cols = { { kind = 'audio', label = 'Audio · B', items = tracks_of('audio') },
-                 { kind = 'sub', label = 'Subtitles · V', items = tracks_of('sub') } }
+  local cols = { { kind = 'audio', label = 'Audio · ' .. hotkey_label('audio'), items = tracks_of('audio') },
+                 { kind = 'sub', label = 'Subtitles · ' .. hotkey_label('sub'), items = tracks_of('sub') } }
   table.insert(cols[2].items, 1, { off = true, id = 'no', type = 'sub', selected = not selected('sub') })
   local colw, pad, gap = 248 * s, 16 * s, 24 * s
   local rows = 0
@@ -676,7 +681,7 @@ local function draw_panel()
   fill(rect(x0, 0, 1 * s, st.h), T.lineStrong)
   zone('panel', x0, 0, pw, st.h)
   -- head
-  txt(x0 + 16 * s, 24 * s, 'PLAYLIST · P', { size = 11, weight = 600, color = T.muted, extra = '\\fsp1.5' })
+  txt(x0 + 16 * s, 24 * s, 'PLAYLIST · ' .. hotkey_label('playlist'), { size = 11, weight = 600, color = T.muted, extra = '\\fsp1.5' })
   ibtn('pl-open', st.w - 84 * s, 4 * s, 'open')
   ibtn('pl-close', st.w - 44 * s, 4 * s, 'close')
   fill(rect(x0, TOP_H * s, pw, 1 * s), T.line)
@@ -996,8 +1001,8 @@ local function cm_subs()
   local d = mp.get_property_number('sub-delay') or 0
   it[#it + 1] = { sep = true }
   it[#it + 1] = { header = string.format('DELAY  %+.2fs', d) }
-  it[#it + 1] = { label = 'Earlier by 50 ms', key = 'Z', keep = true, fn = function() mp.commandv('add', 'sub-delay', -0.05) end }
-  it[#it + 1] = { label = 'Later by 50 ms', key = 'X', keep = true, fn = function() mp.commandv('add', 'sub-delay', 0.05) end }
+  it[#it + 1] = { label = 'Earlier by 50 ms', key = hotkey_label('sub-minus'), keep = true, fn = function() mp.commandv('add', 'sub-delay', -0.05) end }
+  it[#it + 1] = { label = 'Later by 50 ms', key = hotkey_label('sub-plus'), keep = true, fn = function() mp.commandv('add', 'sub-delay', 0.05) end }
   it[#it + 1] = { label = 'Reset delay', keep = true, disabled = math.abs(d) < 0.001, fn = function() mp.set_property_number('sub-delay', 0) end }
   for _, p in ipairs(pref_items('sub')) do it[#it + 1] = p end
   return it
@@ -1074,7 +1079,7 @@ local function cm_main()
     end
   end
   local items = {
-    { label = 'Open file…', key = 'O', fn = function() mp.commandv('script-message-to', 'main', 'doga-open') end },
+    { label = 'Open file…', key = hotkey_label('open'), fn = function() mp.commandv('script-message-to', 'main', 'doga-open') end },
     { sep = true },
     { label = 'Audio', sub = cm_audio, value = not nofile and chip_label('audio') or nil, disabled = nofile },
     { label = 'Subtitles', sub = cm_subs, value = not nofile and chip_label('sub') or nil, disabled = nofile },
@@ -1082,11 +1087,11 @@ local function cm_main()
     { label = 'Speed', sub = cm_speed, value = math.abs(sp - 1) > 0.001 and string.format('%g×', sp) or nil, disabled = nofile },
     { label = 'Theme', sub = cm_theme, value = THEMES[theme_i].name },
     { sep = true },
-    { label = 'Playlist', key = 'P', check = st.panel, fn = function() st.panel = not st.panel; apply_margin(); save_settings() end },
-    { label = 'Info', key = 'I', check = st.info, disabled = nofile, fn = function() st.info = not st.info end },
-    { label = 'Fullscreen', key = 'F', check = st.fs, fn = function() mp.commandv('cycle', 'fullscreen') end },
+    { label = 'Playlist', key = hotkey_label('playlist'), check = st.panel, fn = function() st.panel = not st.panel; apply_margin(); save_settings() end },
+    { label = 'Info', key = hotkey_label('info'), check = st.info, disabled = nofile, fn = function() st.info = not st.info end },
+    { label = 'Fullscreen', key = hotkey_label('full'), check = st.fs, fn = function() mp.commandv('cycle', 'fullscreen') end },
     { sep = true },
-    { label = 'Settings…', key = 'Ctrl+,', fn = function() open_settings() end },
+    { label = 'Settings…', key = hotkey_label('settings'), fn = function() open_settings() end },
   }
   for i = #top, 1, -1 do table.insert(items, 1, top[i]) end
   return items
@@ -1215,10 +1220,10 @@ local HOTKEYS = {
   { id = 'vol-up', label = 'Volume up', key = 'UP', cmd = 'script-binding doga/vol-up' },
   { id = 'vol-down', label = 'Volume down', key = 'DOWN', cmd = 'script-binding doga/vol-down' },
   { id = 'mute', label = 'Mute', key = 'm', cmd = 'script-binding doga/mute' },
-  { id = 'full', label = 'Fullscreen', key = 'f', cmd = 'no-osd cycle fullscreen' },
+  { id = 'full', label = 'Fullscreen', key = 'ENTER', cmd = 'no-osd cycle fullscreen' },
   { id = 'playlist', label = 'Playlist', key = 'p', cmd = 'script-binding doga/toggle-playlist' },
-  { id = 'next', label = 'Next in playlist', key = 'ENTER', cmd = 'no-osd playlist-next' },
-  { id = 'prev', label = 'Previous in playlist', key = 'Shift+ENTER', cmd = 'no-osd playlist-prev' },
+  { id = 'next', label = 'Next in playlist', key = 'PGDWN', cmd = 'no-osd playlist-next' },
+  { id = 'prev', label = 'Previous in playlist', key = 'PGUP', cmd = 'no-osd playlist-prev' },
   { id = 'info', label = 'Info', key = 'i', cmd = 'script-binding doga/toggle-info' },
   { id = 'open', label = 'Open file', key = 'o', cmd = 'script-binding doga/open' },
   { id = 'sub-minus', label = 'Subtitles earlier', key = 'z', cmd = 'script-binding doga/sub-delay-minus' },
@@ -1231,6 +1236,8 @@ local HOTKEYS = {
 }
 
 local function key_of(h) local k = cfg.keys[h.id]; if k == nil then return h.key end; return k end
+local HOTKEY_BY_ID = {}
+for _, h in ipairs(HOTKEYS) do HOTKEY_BY_ID[h.id] = h end
 
 local KEY_NAMES = { SPACE = 'Space', ENTER = 'Enter', LEFT = '←', RIGHT = '→', UP = '↑', DOWN = '↓', ESC = 'Esc', BS = 'Backspace',
   DEL = 'Delete', INS = 'Insert', PGUP = 'Page Up', PGDWN = 'Page Down', HOME = 'Home', END = 'End', TAB = 'Tab' }
@@ -1241,6 +1248,12 @@ local function key_label(k)
   if base:match('^%u$') then mods = mods .. 'Shift+' end
   base = KEY_NAMES[base] or (#base == 1 and base:upper()) or base
   return mods .. base
+end
+hotkey_label = function(id)
+  local h = HOTKEY_BY_ID[id]
+  if not h then return '' end
+  local k = key_of(h)
+  return k == '' and '' or key_label(k)
 end
 
 -- Hotkey overrides are forced bindings layered over ui/input.conf.

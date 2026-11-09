@@ -20,9 +20,9 @@ A video player for Windows that plays the file exactly as it was made: no colour
 | Shift+← / → or , / . | one frame |
 | ↑ / ↓, wheel | volume |
 | M | mute |
-| F, double-click | fullscreen |
+| Enter, F, double-click | fullscreen |
 | P | playlist panel |
-| Enter / Shift+Enter | next / previous in playlist |
+| Page Down / Page Up | next / previous in playlist |
 | I | info (Exact / Passthrough / Tone-mapped) |
 | O | open files |
 | Z / X | subtitle delay −/+ 50 ms |
