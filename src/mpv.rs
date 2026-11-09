@@ -192,14 +192,34 @@ impl Mpv {
 
     /// `screenshot-raw video bgra`: the current (filtered) video frame, no subtitles or OSD.
     pub fn screenshot_bgra(&self) -> Option<Frame> {
-        let owned: Vec<CString> = ["screenshot-raw", "video", "bgra"].iter().map(|a| cstr(a)).collect();
+        self.screenshot_raw("bgra", 4)
+    }
+
+    /// The same frame for the clipboard, as 8-bit BGRA without dither noise. mpv's own 8-bit
+    /// output is dithered, which is right for a screen but leaves a flat colour speckled by
+    /// one level once it is pasted into an editor. So this asks for 16 bits per channel (what
+    /// the S screenshot saves) and rounds each value to the nearest 8-bit one.
+    pub fn screenshot_exact(&self) -> Option<Frame> {
+        let Some(f) = self.screenshot_raw("rgba64", 8) else {
+            return self.screenshot_bgra();
+        };
+        let mut out = Vec::with_capacity(f.data.len() / 2);
+        for px in f.data.chunks_exact(8) {
+            let to8 = |i: usize| ((u16::from_ne_bytes([px[i], px[i + 1]]) as u32 * 255 + 32767) / 65535) as u8;
+            out.extend_from_slice(&[to8(4), to8(2), to8(0), 255]);
+        }
+        Some(Frame { w: f.w, h: f.h, data: out })
+    }
+
+    fn screenshot_raw(&self, format: &str, bytes_per_px: usize) -> Option<Frame> {
+        let owned: Vec<CString> = ["screenshot-raw", "video", format].iter().map(|a| cstr(a)).collect();
         let mut ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
         ptrs.push(std::ptr::null());
         let mut node = Node { u: NodeU { i: 0 }, format: 0 };
         if unsafe { (self.api.command_ret)(self.h, ptrs.as_mut_ptr(), &mut node) } < 0 {
             return None;
         }
-        let frame = unsafe { read_frame(&node) };
+        let frame = unsafe { read_frame(&node, format, bytes_per_px) };
         unsafe { (self.api.free_node_contents)(&mut node) };
         frame
     }
@@ -229,8 +249,8 @@ impl Drop for Mpv {
     }
 }
 
-/// Pull w/h/stride/format/data out of a screenshot-raw result map.
-unsafe fn read_frame(node: &Node) -> Option<Frame> {
+/// Pull w/h/stride/format/data out of a screenshot-raw result map, as tightly packed rows.
+unsafe fn read_frame(node: &Node, format: &str, bpp: usize) -> Option<Frame> {
     if node.format != FMT_NODE_MAP || node.u.list.is_null() {
         return None;
     }
@@ -243,7 +263,7 @@ unsafe fn read_frame(node: &Node) -> Option<Frame> {
             (b"w", FMT_INT64) => w = v.u.i,
             (b"h", FMT_INT64) => h = v.u.i,
             (b"stride", FMT_INT64) => stride = v.u.i,
-            (b"format", FMT_STRING) => fmt_ok = CStr::from_ptr(v.u.s).to_bytes() == b"bgra",
+            (b"format", FMT_STRING) => fmt_ok = CStr::from_ptr(v.u.s).to_bytes() == format.as_bytes(),
             (b"data", FMT_BYTE_ARRAY) if !v.u.ba.is_null() => {
                 let ba = &*v.u.ba;
                 data = Some(std::slice::from_raw_parts(ba.data as *const u8, ba.size));
@@ -252,13 +272,14 @@ unsafe fn read_frame(node: &Node) -> Option<Frame> {
         }
     }
     let data = data?;
-    if !fmt_ok || w <= 0 || h <= 0 || stride < w * 4 || (data.len() as i64) < stride * (h - 1) + w * 4 {
+    let bpp = bpp as i64;
+    if !fmt_ok || w <= 0 || h <= 0 || stride < w * bpp || (data.len() as i64) < stride * (h - 1) + w * bpp {
         return None;
     }
-    let (w, h, stride) = (w as usize, h as usize, stride as usize);
-    let mut out = Vec::with_capacity(w * h * 4);
+    let (w, h, stride, bpp) = (w as usize, h as usize, stride as usize, bpp as usize);
+    let mut out = Vec::with_capacity(w * h * bpp);
     for row in 0..h {
-        out.extend_from_slice(&data[row * stride..row * stride + w * 4]);
+        out.extend_from_slice(&data[row * stride..row * stride + w * bpp]);
     }
     Some(Frame { w: w as u32, h: h as u32, data: out })
 }

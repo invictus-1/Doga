@@ -120,7 +120,15 @@ fn run_player() {
         win::message_box("Dōga", "The ui folder (ui\\doga.lua) was not found next to doga.exe.");
         return;
     };
-    let data = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| exe_dir.clone()).join("Doga");
+    // Portable: a portable.txt beside doga.exe keeps settings, resume positions and recent
+    // files in a data folder there instead of %APPDATA%, so the folder can be carried around
+    // and leaves nothing behind on the PC.
+    let portable = exe_dir.join("portable.txt").is_file();
+    let data = if portable {
+        exe_dir.join("data")
+    } else {
+        std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| exe_dir.clone()).join("Doga")
+    };
     let _ = std::fs::create_dir_all(data.join("watch_later"));
 
     // Files from the command line / "Open with" / a drop onto the exe.
@@ -156,7 +164,7 @@ fn run_player() {
             return;
         }
     };
-    configure(&mpv, &ui, &data);
+    configure(&mpv, &ui, &data, portable);
     if let Err(e) = mpv.initialize() {
         win::message_box("Dōga", &format!("Could not start the playback engine:\n{e}"));
         return;
@@ -189,6 +197,14 @@ fn run_player() {
                 Some("doga-update-install") => update::spawn_install(mpv.clone()),
                 Some("doga-update-check") => update::spawn_check_now(mpv.clone(), data.clone()),
                 Some("doga-open-data") => sys::shell_open(&data.to_string_lossy()),
+                Some("doga-copy-frame") => copy_frame(&mpv),
+                // off the event loop: the folder may be on a drive that has to wake up first
+                Some("doga-next") => {
+                    if let Some(p) = args.get(1).cloned() {
+                        let m = mpv.clone();
+                        std::thread::spawn(move || publish_next(&m, &p));
+                    }
+                }
                 Some("doga-open-shots") => {
                     if let Some(dir) = screenshot_dir() {
                         let _ = std::fs::create_dir_all(&dir);
@@ -302,7 +318,7 @@ fn has_font(ui: &Path, prefix: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn configure(m: &Mpv, ui: &Path, data: &Path) {
+fn configure(m: &Mpv, ui: &Path, data: &Path, portable: bool) {
     let p = |x: &Path| x.to_string_lossy().replace('\\', "/");
     let ui_font = if has_font(ui, "ChakraPetch") { "Chakra Petch" } else { "Segoe UI" };
     let mono_font = if has_font(ui, "JetBrainsMono") { "JetBrains Mono" } else { "Consolas" };
@@ -432,11 +448,12 @@ fn configure(m: &Mpv, ui: &Path, data: &Path) {
     m.opt(
         "script-opts",
         &format!(
-            "doga-datadir={},doga-uidir={},doga-uifont={ui_font},doga-monofont={mono_font},doga-hasfile={},doga-version={}",
+            "doga-datadir={},doga-uidir={},doga-uifont={ui_font},doga-monofont={mono_font},doga-hasfile={},doga-version={},doga-portable={}",
             opt_quote(&p(data)),
             opt_quote(&p(ui)),
             if has_file { "yes" } else { "no" },
-            update::VERSION
+            update::VERSION,
+            if portable { "yes" } else { "no" }
         ),
     );
 }
@@ -500,6 +517,38 @@ fn publish_series(m: &Mpv, name: Option<&str>, total: usize, entries: &[(String,
     j += "}}";
     m.set_prop("user-data/doga/series", &j);
     let _ = m.command(&["script-message-to", "doga", "doga-series", &j]);
+}
+
+/// What follows `path` in its series, for the start screen's Continue row:
+/// `{"for":path,"name":series|null,"next":[[path,label],…]}`.
+fn publish_next(m: &Mpv, path: &str) {
+    let mut j = format!("{{\"for\":{},", json_str(path));
+    match Some(Path::new(path)).filter(|p| p.is_file()).and_then(series::detect) {
+        Some(s) => {
+            j += &format!("\"name\":{},\"next\":[", json_str(&s.name));
+            let after = s.files.iter().zip(&s.labels).skip(s.current + 1).take(300);
+            for (i, (f, l)) in after.enumerate() {
+                if i > 0 {
+                    j.push(',');
+                }
+                j += &format!("[{},{}]", json_str(&f.to_string_lossy()), json_str(l));
+            }
+            j += "]}";
+        }
+        None => j += "\"name\":null,\"next\":[]}",
+    }
+    let _ = m.command(&["script-message-to", "doga", "doga-next", &j]);
+}
+
+/// Ctrl+C: the frame on screen (the picture only: no subtitles, no controls) onto the clipboard.
+fn copy_frame(m: &Mpv) {
+    let owner: isize = m.get_prop("window-id").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let size = m.screenshot_exact().filter(|f| sys::clipboard_set_image(owner, f.w, f.h, &f.data)).map(|f| (f.w, f.h));
+    let (state, w, h) = match size {
+        Some((w, h)) => ("ok", w, h),
+        None => ("fail", 0, 0),
+    };
+    let _ = m.command(&["script-message-to", "doga", "doga-copied", state, &w.to_string(), &h.to_string()]);
 }
 
 fn screenshot_dir() -> Option<PathBuf> {

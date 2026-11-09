@@ -15,7 +15,7 @@ A video player for Windows that plays the file exactly as it was made: no colour
 | **B** / Shift+B | next / previous audio track |
 | **V** / Shift+V | next / previous subtitle track (Off is part of the cycle) |
 | Space, click | play / pause |
-| Right-click | menu: open, audio, subtitles (+ delay), video (aspect, rotate, deinterlace), speed, theme, playlist, info, fullscreen |
+| Right-click | menu: open, audio, subtitles (+ delay), video (aspect, rotate, deinterlace, screenshot, copy frame), speed, theme, playlist, info, fullscreen, always on top |
 | ← / → | 5 seconds back / forward |
 | Shift+← / → or , / . | one frame |
 | ↑ / ↓, wheel | volume |
@@ -29,6 +29,8 @@ A video player for Windows that plays the file exactly as it was made: no colour
 | Ctrl+Z / Ctrl+X | audio delay −/+ 50 ms (remembered; for Bluetooth headphones) |
 | Home | back to the start |
 | S / Shift+S | screenshot of the exact frame / with subtitles, PNG in Pictures\Dōga |
+| Ctrl+C | copy the exact frame to the clipboard (picture only), ready to paste into a chat or an editor |
+| T | always on top, on / off (remembered) |
 | Ctrl+T | next theme (Nightshade, Glacier, Redline, Carbon) |
 | Ctrl+, | Settings |
 | Esc | close menu / leave fullscreen |
@@ -64,6 +66,9 @@ Each theme also has its own start-screen cover. The installer and updater open i
 
 - **Same monitor:** Dōga opens on the screen it was last on, and so does fullscreen.
 - **Resume:** files pick up where you stopped, with a short "Resumed at 12:34 · Start over" chip. Home goes back to the start.
+- **Continue:** the start screen's first row is the file you stopped in, or, when you finished it, the next episode you haven't watched. One click and you're back in.
+- **Same tracks for a whole series:** pick the dub, or the "Signs & Songs" subtitles, or subtitles off, in one episode and the rest of the series opens the same way. The pick is matched by language and track name, so it still lands on the right track when an episode orders its tracks differently. It only ever applies to that series. Settings › Playback turns it off.
+- **Watched marks:** the playlist shows a tick on episodes you finished and a thin line for how far you got in the ones you started.
 - **When something can't play:** a broken or unsupported file gets a plain message saying which file and why, and the playlist carries on.
 - **One window:** opening a video while Dōga is already open plays it in that window. Several files opened together from Explorer become one playlist.
 - **Preferred languages:** right-click › Audio or Subtitles › "For every file" › "Prefer Japanese" (or whichever language is playing). New files then pick that track automatically. Files you've already watched keep the tracks you chose for them.
@@ -76,6 +81,8 @@ Run `dist\Doga-Setup.exe`. It installs just for you, with no admin rights, into 
 - a Start menu shortcut (always) and a desktop shortcut,
 - "Open with" registration for video files (Windows then asks you to confirm Dōga in Default apps),
 - an entry in Settings › Apps. Uninstalling there removes exactly what setup created and keeps your settings in `%APPDATA%\Doga`.
+
+**Portable:** each release also has `Doga-<version>-portable.zip`. Unzip it anywhere (a USB stick is fine) and run `doga.exe`: nothing is installed. The `portable.txt` beside the exe makes Dōga keep its settings, resume positions and recent files in a `data` folder there instead of `%APPDATA%`. A portable copy doesn't update itself; "Check now" opens the download page, and you replace `doga.exe`, `libmpv-2.dll` and the `ui` folder.
 
 Build the installer yourself:
 
@@ -97,7 +104,7 @@ To switch the check off, go to Settings › About › Updates › Never. "Check 
 ### Releasing (maintainers)
 
 - One time: `doga.exe --gen-update-key`. This writes the private key to `%USERPROFILE%\.doga-release\update.key` and the public key to `assets/update.pub`. Back up the private key and never commit it. Losing it means a new key, and everyone has to update by hand once.
-- Each release: bump `version` in `Cargo.toml`, then run `tools/build-installer.ps1`. It builds, packs and signs `dist/Doga-Setup-<version>.exe(.sig)`. Upload both files to a GitHub release tagged `v<version>`.
+- Each release: bump `version` in `Cargo.toml`, then run `tools/build-installer.ps1`. It builds, packs and signs `dist/Doga-Setup-<version>.exe(.sig)` and zips `dist/Doga-<version>-portable.zip`. Upload all three files to a GitHub release tagged `v<version>`.
 
 ## Startup animation
 
@@ -124,7 +131,7 @@ At runtime Dōga needs `libmpv-2.dll`. Put it next to `doga.exe`, or in `vendor/
 cargo run -- "D:\Anime\Show - 01.mkv"
 ```
 
-Settings, resume positions and recent files are stored in `%APPDATA%\Doga`. The window opens the way you last left it: maximized, or windowed and fitted to the video. Fullscreen is always manual.
+Settings, resume positions, recent files and the tracks picked per series (`series.json`) are stored in `%APPDATA%\Doga`, or in `data\` beside `doga.exe` when a `portable.txt` sits there. The window opens the way you last left it: maximized, or windowed and fitted to the video. Fullscreen is always manual.
 
 ## Series detection
 

@@ -66,12 +66,20 @@ extern "system" {
 extern "system" {
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
     fn FreeLibrary(m: *mut c_void) -> i32;
+    fn GlobalAlloc(flags: u32, bytes: usize) -> *mut c_void;
+    fn GlobalLock(mem: *mut c_void) -> *mut c_void;
+    fn GlobalUnlock(mem: *mut c_void) -> i32;
+    fn GlobalFree(mem: *mut c_void) -> *mut c_void;
 }
 
 #[link(name = "user32")]
 extern "system" {
     fn MessageBoxW(hwnd: *mut c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
     fn GetDpiForSystem() -> u32;
+    fn OpenClipboard(owner: *mut c_void) -> i32;
+    fn EmptyClipboard() -> i32;
+    fn SetClipboardData(format: u32, mem: *mut c_void) -> *mut c_void;
+    fn CloseClipboard() -> i32;
 }
 
 #[repr(C)]
@@ -430,6 +438,69 @@ pub fn pick_folder(owner: isize, title: &str) -> Option<PathBuf> {
     }
     let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
     Some(PathBuf::from(OsString::from_wide(&buf[..n])))
+}
+
+/// Put a tightly packed, top-down BGRA image on the clipboard as a plain bitmap (CF_DIB),
+/// which every paste target understands. The pixels are copied untouched; only the unused
+/// fourth byte is set to opaque, since some programs read it as alpha.
+pub fn clipboard_set_image(owner: isize, w: u32, h: u32, bgra: &[u8]) -> bool {
+    const CF_DIB: u32 = 8;
+    const GMEM_MOVEABLE: u32 = 2;
+    const HEAD: usize = 40; // BITMAPINFOHEADER
+    let (wu, hu) = (w as usize, h as usize);
+    let stride = wu * 4;
+    let Some(pixels) = stride.checked_mul(hu).filter(|&n| n > 0 && n <= bgra.len() && n <= u32::MAX as usize) else {
+        return false;
+    };
+    unsafe {
+        let mem = GlobalAlloc(GMEM_MOVEABLE, HEAD + pixels);
+        if mem.is_null() {
+            return false;
+        }
+        let p = GlobalLock(mem) as *mut u8;
+        if p.is_null() {
+            GlobalFree(mem);
+            return false;
+        }
+        let mut head = [0u8; HEAD];
+        head[0..4].copy_from_slice(&(HEAD as u32).to_le_bytes());
+        head[4..8].copy_from_slice(&(w as i32).to_le_bytes());
+        head[8..12].copy_from_slice(&(h as i32).to_le_bytes()); // positive: rows run bottom-up
+        head[12..14].copy_from_slice(&1u16.to_le_bytes()); // planes
+        head[14..16].copy_from_slice(&32u16.to_le_bytes()); // bits per pixel; compression stays 0 (BI_RGB)
+        head[20..24].copy_from_slice(&(pixels as u32).to_le_bytes());
+        std::ptr::copy_nonoverlapping(head.as_ptr(), p, HEAD);
+        let out = std::slice::from_raw_parts_mut(p.add(HEAD), pixels);
+        for (y, dst) in out.chunks_exact_mut(stride).enumerate() {
+            let from = (hu - 1 - y) * stride;
+            dst.copy_from_slice(&bgra[from..from + stride]);
+            for px in dst.chunks_exact_mut(4) {
+                px[3] = 255;
+            }
+        }
+        GlobalUnlock(mem);
+        // another program may be holding the clipboard for a moment
+        let mut open = false;
+        for _ in 0..10 {
+            if OpenClipboard(owner as *mut c_void) != 0 {
+                open = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !open {
+            GlobalFree(mem);
+            return false;
+        }
+        EmptyClipboard();
+        // on success the clipboard owns the memory
+        let ok = !SetClipboardData(CF_DIB, mem).is_null();
+        CloseClipboard();
+        if !ok {
+            GlobalFree(mem);
+        }
+        ok
+    }
 }
 
 pub fn shell_open(target: &str) {

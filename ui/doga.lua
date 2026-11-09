@@ -12,6 +12,7 @@ local OPT = {
   mono = mp.get_opt('doga-monofont') or 'Consolas',
   hasfile = mp.get_opt('doga-hasfile') == 'yes',
   version = mp.get_opt('doga-version') or '',
+  portable = mp.get_opt('doga-portable') == 'yes', -- running from an unzipped folder (no installer)
 }
 package.path = OPT.uidir .. '/?.lua;' .. package.path
 local K = require 'kit'
@@ -88,6 +89,8 @@ local cfg = {
   audio_device = 'auto',
   audio_delay = 0,        -- seconds; remembered (it's the headphones', not the file's)
   display = '',           -- monitor the window was last on (applied by the host at launch)
+  series_tracks = true,   -- the audio and subtitles picked in one episode follow to the rest
+  ontop = false,          -- keep the window above other windows
   keys = {},              -- hotkey overrides: action id → key ('' = unassigned)
 }
 
@@ -99,6 +102,7 @@ local function save_settings()
     resume = cfg.resume, autoplaylist = cfg.autoplaylist, skip_button = cfg.skip_button, updates = cfg.updates,
     volume_mode = cfg.volume_mode, audio_device = cfg.audio_device, keys = cfg.keys,
     audio_delay = cfg.audio_delay, display = cfg.display,
+    series_tracks = cfg.series_tracks, ontop = cfg.ontop,
   })
 end
 
@@ -310,14 +314,28 @@ local function osd(icon_name, lead, value, meta, opts)
   render()
 end
 
+-- A track picked by hand belongs to this file only. What carries it to the next episode is
+-- the series memory (further down), which matches by language and title, not by number.
+local function pick_track(kind, id)
+  mp.set_property('file-local-options/' .. (kind == 'audio' and 'aid' or 'sid'), tostring(id))
+end
+local series_keep = function() return false end -- forward: remember a pick for the series
+
 local function show_track_osd(kind, t)
+  local function note(meta, kept)
+    if not kept then return meta end
+    return (meta ~= '' and (meta .. ' · ') or '') .. 'whole series'
+  end
   if kind == 'audio' then
-    local only = #tracks_of('audio') == 1 and ' · only track' or ''
-    osd('audio', 'Audio', track_name(t), track_meta(t) .. only)
+    if #tracks_of('audio') == 1 then
+      osd('audio', 'Audio', track_name(t), note(track_meta(t), false) .. ' · only track')
+    else
+      osd('audio', 'Audio', track_name(t), note(track_meta(t), series_keep('audio', t)))
+    end
   elseif t then
-    osd('subs', 'Subtitles', track_name(t), track_meta(t))
+    osd('subs', 'Subtitles', track_name(t), note(track_meta(t), series_keep('sub', t)))
   else
-    osd('subs', nil, 'Subtitles off', nil, { off = true })
+    osd('subs', nil, 'Subtitles off', series_keep('sub', nil) and 'whole series' or nil, { off = true })
   end
 end
 
@@ -328,16 +346,16 @@ local function cycle(kind, dir)
   if kind == 'audio' then
     if #list == 0 then osd('audio', 'Audio', 'none in this file', nil, { off = true }); return end
     local n = (((cur or 1) - 1 + dir) % #list) + 1
-    mp.set_property_number('aid', list[n].id)
+    pick_track('audio', list[n].id)
     show_track_osd('audio', list[n])
   else
     if #list == 0 then osd('subs', 'Subtitles', 'none in this file', nil, { off = true }); return end
     local total = #list + 1 -- the extra slot is Off
     local n = ((((cur or total) - 1 + dir) % total) + 1)
     if n == total then
-      mp.set_property('sid', 'no'); show_track_osd('sub', nil)
+      pick_track('sub', 'no'); show_track_osd('sub', nil)
     else
-      mp.set_property_number('sid', list[n].id); show_track_osd('sub', list[n])
+      pick_track('sub', list[n].id); show_track_osd('sub', list[n])
     end
   end
 end
@@ -395,6 +413,119 @@ local function entry_info(e)
   if token == nil or token == '' then token = guess_token(title) end
   return title, token
 end
+
+---------------------------------------------------------------------------
+-- Tracks per series: the audio and subtitles picked in one episode follow to the rest.
+-- A pick is kept as what the track is (language, title, position), never as a bare number,
+-- so an episode laid out differently gets the matching track or is left to its default.
+---------------------------------------------------------------------------
+local series_path = OPT.datadir ~= '' and utils.join_path(OPT.datadir, 'series.json') or nil
+local series_db   -- newest first: { dir, name, stem, audio = sig, sub = sig | { off = true } }
+local series_done -- the file the memory was last applied to
+local function series_all()
+  if not series_db then
+    local t = read_json(series_path)
+    series_db = type(t) == 'table' and t or {}
+  end
+  return series_db
+end
+local function dir_key(path)
+  return (((path or ''):gsub('/', '\\')):match('^(.*)\\[^\\]*$') or ''):lower()
+end
+-- "Show - 03 [1080p].mkv" → "show": what the file names of one series share
+local function stem_key(path)
+  local t = clean_title(path):lower():gsub('%d+', ' '):gsub('[%s%p]+', ' ')
+  return (t:gsub('^ ', ''):gsub(' $', ''))
+end
+-- The series a file is part of: the host's detection when it covers the file, otherwise
+-- other playlist entries from the same folder whose names differ only by a number.
+local function series_id(path)
+  if not path then return nil end
+  local dir, stem = dir_key(path), stem_key(path)
+  local sr = st.series
+  if sr and sr.name and (sr.matched or 0) > 1 and sr.entries and sr.entries[path] ~= nil then return dir, sr.name, stem end
+  if stem ~= '' then
+    for _, e in ipairs(st.playlist) do
+      if e.filename ~= path and dir_key(e.filename) == dir and stem_key(e.filename) == stem then return dir, nil, stem end
+    end
+  end
+  return nil
+end
+local function series_choice(path)
+  local dir, stem = dir_key(path), stem_key(path)
+  local sr = st.series
+  local name = sr and sr.entries and sr.entries[path] ~= nil and sr.name or nil
+  for i, c in ipairs(series_all()) do
+    if c.dir == dir and ((name and c.name == name) or (stem ~= '' and c.stem == stem)) then return c, i end
+  end
+end
+local function track_sig(t, list)
+  local n = 0
+  for i, x in ipairs(list) do if x.id == t.id then n = i end end
+  return { lang = (t.lang or ''):lower(), title = t.external and '' or (t.title or ''), n = n, of = #list,
+    forced = t.forced and true or false, ext = t.external and true or false }
+end
+-- The track in `list` that is the same thing as the remembered one, or nil. The language has
+-- to agree; among those, the same title wins, then the same position.
+local function series_match(list, w)
+  local best, best_score
+  for i, t in ipairs(list) do
+    local lang = (t.lang or ''):lower()
+    local title = t.external and '' or (t.title or '')
+    local ok = lang == (w.lang or '')
+    if ok and lang == '' then ok = (title ~= '' and title == w.title) or (i == w.n and #list == w.of) end
+    if ok then
+      local sc = 0
+      if title == (w.title or '') then sc = sc + (title ~= '' and 8 or 2) end
+      if i == w.n then sc = sc + (#list == w.of and 4 or 2) end
+      if (t.forced and true or false) == (w.forced and true or false) then sc = sc + 1 end
+      if (t.external and true or false) == (w.ext and true or false) then sc = sc + 1 end
+      if not best or sc > best_score then best, best_score = t, sc end
+    end
+  end
+  return best
+end
+series_keep = function(kind, t)
+  if not cfg.series_tracks then return false end
+  local dir, name, stem = series_id(st.path)
+  if not dir then return false end
+  local list = tracks_of(kind)
+  local db = series_all()
+  local c, i = series_choice(st.path)
+  if c then table.remove(db, i) else c = { dir = dir } end
+  c.name, c.stem = name or c.name, stem
+  c[kind] = t and track_sig(t, list) or { off = true }
+  table.insert(db, 1, c)
+  while #db > 100 do table.remove(db) end
+  write_json(series_path, db)
+  return true
+end
+local function series_apply(path, tracks)
+  if not cfg.series_tracks or not path then return end
+  local c = series_choice(path)
+  if not c then return end
+  for _, kind in ipairs({ 'audio', 'sub' }) do
+    local w = c[kind]
+    if type(w) == 'table' then
+      local id
+      if w.off then
+        id = 'no'
+      else
+        local list = {}
+        for _, t in ipairs(tracks) do if t.type == kind then list[#list + 1] = t end end
+        local t = series_match(list, w)
+        id = t and t.id
+      end
+      if id then pick_track(kind, id) end
+    end
+  end
+  series_done = path
+end
+-- Before mpv chooses this file's tracks, so nothing is heard or seen switching.
+mp.add_hook('on_preloaded', 50, function()
+  series_done = nil
+  series_apply(mp.get_property('path'), mp.get_property_native('track-list') or {})
+end)
 
 ---------------------------------------------------------------------------
 -- Layout constants (CSS px, multiplied by st.s)
@@ -763,16 +894,33 @@ local function draw_panel()
         if cur or hov then fill(rect(x0 + 1 * s, y, pw - 1 * s, rh), T.surface2, 0, clip) end
         local tok = token or tostring(i)
         txt(x0 + 16 * s, y + 18 * s, fit(tok, 44 * s, 13 * s, true), { size = 13, mono = true, weight = 600, color = cur and T.accent or T.muted, extra = clip })
-        txt(x0 + 64 * s, y + 18 * s, fit(title, pw - 80 * s, 14 * s), { size = 14, extra = clip })
-        local meta
-        if cur then meta = 'NOW · ' .. short_time(st.pos) .. (st.dur > 0 and (' / ' .. short_time(st.dur)) or '')
+        local rec = not cur and recent_for(e.filename) or nil
+        local seen = rec and rec.watched
+        txt(x0 + 64 * s, y + 18 * s, fit(title, pw - (seen and 108 or 80) * s, 14 * s), { size = 14, color = seen and T.muted or T.ink, extra = clip })
+        local meta, part
+        if cur then
+          meta = 'NOW · ' .. short_time(st.pos) .. (st.dur > 0 and (' / ' .. short_time(st.dur)) or '')
+          part = st.dur > 0 and st.pos / st.dur or nil
+        elseif seen then
+          meta = 'Watched'
+        elseif rec and rec.pos and rec.pos > 5 then
+          meta = 'Stopped at ' .. short_time(rec.pos)
+          part = rec.dur and rec.dur > 0 and rec.pos / rec.dur or nil
         else
-          local rec = recent_for(e.filename)
-          if rec and rec.watched then meta = 'Watched'
-          elseif rec and rec.pos and rec.pos > 5 then meta = 'Stopped at ' .. short_time(rec.pos)
-          else meta = ((e.filename or ''):match('%.(%w+)$') or ''):upper() end
+          meta = ((e.filename or ''):match('%.(%w+)$') or ''):upper()
         end
         txt(x0 + 64 * s, y + 35 * s, meta, { size = 12, mono = true, weight = 500, color = cur and T.accent or T.muted, extra = clip })
+        if seen then
+          -- finished: a quiet tick at the row's right edge
+          local k, tx, ty = 18 * s / 24, x0 + pw - 36 * s, y + 9 * s
+          stroke(poly({ tx + 5 * k, ty + 12.5 * k, tx + 9.5 * k, ty + 17 * k, tx + 19 * k, ty + 7.5 * k, tx + 9.5 * k, ty + 17 * k }),
+            T.muted, 1.75 * k, 0, clip)
+        elseif part then
+          -- started: how far it got, as a hairline under the row (accent for the one playing)
+          local lx, lw = x0 + 64 * s, pw - 80 * s
+          fill(rect(lx, y + rh - 2 * s, lw, 2 * s), T.line, 0, clip)
+          fill(rect(lx, y + rh - 2 * s, r(lw * math.max(0, math.min(1, part))), 2 * s), cur and T.accent or T.muted, 0, clip)
+        end
         zone('pl-row', x0, math.max(y, ly), pw, math.min(rh, ly + lh - math.max(y, ly)), { i = i })
       end
     end
@@ -1027,30 +1175,58 @@ local function draw_idle(vw)
     zone('update', ux, uy, uw, uh)
   end
 
-  if #recent > 0 then
+  -- Continue (one row: the file you stopped in, or the next episode of the series you
+  -- finished one of) above Recent. The Continue row is never repeated under Recent.
+  local cont = st.cont
+  if cont or #recent > 0 then
     -- scales with the window like the rest, but never smaller than normal UI text
     local k = math.max(s, u)
     local f = k / s -- font multiplier (txt sizes are css px × s)
     local rh = ROW_H * k
+    local gap = 34 * k -- between the Continue row and Recent's first row (holds the header)
     local split = vw >= 860 * s
     local rx = split and (vw / 2) or gx
-    local n = math.min(5, #recent)
-    local top = split and (by - n * rh) or (by - 150 * k - n * rh)
-    while n > 0 and top < bh + 40 * u + 20 * k do n = n - 1; top = top + rh end
-    if n > 0 then
+    local rows = {}
+    for _, rr in ipairs(recent) do
+      if #rows >= (cont and 4 or 5) then break end
+      if not (cont and rr.path == cont.path) then rows[#rows + 1] = rr end
+    end
+    local n = #rows
+    local bottom = split and by or (by - 150 * k)
+    local limit = bh + 40 * u + 20 * k
+    local function top_of() return bottom - n * rh - (cont and (rh + (n > 0 and gap or 0)) or 0) end
+    while n > 0 and top_of() < limit do n = n - 1 end
+    if cont and top_of() < limit then cont = nil end
+    if cont or n > 0 then
       local a2 = 255 - K.span(t, 0.95, 1.3) * 255
-      local rise = (1 - K.out_cubic(K.span(t, 0.95, 1.3))) * 8 * k
-      txt(rx + 12 * k, top - 14 * k + rise, 'RECENT', { size = 11 * f, weight = 600, color = T.muted, extra = '\\fsp1.5', alpha = a2 })
+      local y = top_of() + (1 - K.out_cubic(K.span(t, 0.95, 1.3))) * 8 * k
       local rw = vw - rx - 32 * k
-      for i = 1, n do
-        local rr = recent[i]
-        local y = top + (i - 1) * rh + rise
+      local function head(label)
+        txt(rx + 12 * k, y - 14 * k, label, { size = 11 * f, weight = 600, color = T.muted, extra = '\\fsp1.5', alpha = a2 })
+      end
+      local function line(icon_name, color, title, meta, path)
         if within(rx, y, rw, rh) then fill(rect(rx, y, rw, rh), T.surface2) end
-        ctx:icon('open', rx + 12 * k, y + 8 * k, 18 * k, T.muted, a2)
-        txt(rx + 40 * k, y + 17 * k, fit(basename(rr.path), rw - 52 * k, 14 * k), { size = 14 * f, alpha = a2 })
-        local meta = rr.watched and 'Watched' or ('Stopped at ' .. short_time(rr.pos) .. (rr.dur and rr.dur > 0 and (' of ' .. short_time(rr.dur)) or ''))
-        txt(rx + 40 * k, y + 35 * k, meta, { size = 12 * f, weight = 500, color = T.muted, alpha = a2 })
-        zone('recent', rx, y, rw, rh, { path = rr.path })
+        ctx:icon(icon_name, rx + 12 * k, y + 8 * k, 18 * k, color, a2)
+        txt(rx + 40 * k, y + 17 * k, fit(title, rw - 52 * k, 14 * k), { size = 14 * f, alpha = a2 })
+        txt(rx + 40 * k, y + 35 * k, fit(meta, rw - 52 * k, 12 * k), { size = 12 * f, weight = 500, color = T.muted, alpha = a2 })
+        zone('recent', rx, y, rw, rh, { path = path })
+        y = y + rh
+      end
+      local function stopped(e)
+        return 'Stopped at ' .. short_time(e.pos) .. (e.dur and e.dur > 0 and (' of ' .. short_time(e.dur)) or '')
+      end
+      if cont then
+        head('CONTINUE')
+        local meta = (cont.pos or 0) > 5 and stopped(cont) or (cont.series and ('Next in ' .. cont.series) or 'Next episode')
+        line('play', T.accent, clean_title(cont.path), meta, cont.path)
+        if n > 0 then y = y + gap end
+      end
+      if n > 0 then
+        head('RECENT')
+        for i = 1, n do
+          local rr = rows[i]
+          line('open', T.muted, basename(rr.path), rr.watched and 'Watched' or stopped(rr), rr.path)
+        end
       end
     end
   end
@@ -1097,7 +1273,7 @@ local function cm_audio()
   local list = tracks_of('audio')
   if #list == 0 then it[1] = { header = 'NO AUDIO TRACKS' } end
   for _, t in ipairs(list) do
-    it[#it + 1] = radio(track_name(t), t.selected, function() mp.set_property_number('aid', t.id); show_track_osd('audio', t) end, track_meta(t))
+    it[#it + 1] = radio(track_name(t), t.selected, function() pick_track('audio', t.id); show_track_osd('audio', t) end, track_meta(t))
   end
   local d = cfg.audio_delay or 0
   it[#it + 1] = { sep = true }
@@ -1110,9 +1286,9 @@ local function cm_audio()
 end
 
 local function cm_subs()
-  local it = { radio('Off', not selected('sub'), function() mp.set_property('sid', 'no'); show_track_osd('sub', nil) end) }
+  local it = { radio('Off', not selected('sub'), function() pick_track('sub', 'no'); show_track_osd('sub', nil) end) }
   for _, t in ipairs(tracks_of('sub')) do
-    it[#it + 1] = radio(track_name(t), t.selected, function() mp.set_property_number('sid', t.id); show_track_osd('sub', t) end, track_meta(t))
+    it[#it + 1] = radio(track_name(t), t.selected, function() pick_track('sub', t.id); show_track_osd('sub', t) end, track_meta(t))
   end
   local d = mp.get_property_number('sub-delay') or 0
   it[#it + 1] = { sep = true }
@@ -1151,6 +1327,8 @@ local function cm_video()
   local di = mp.get_property('deinterlace') == 'yes'
   it[#it + 1] = { label = 'Deinterlace', check = di, keep = true, meta = 'only for interlaced sources',
     fn = function() mp.set_property('deinterlace', di and 'no' or 'yes') end }
+  it[#it + 1] = { label = 'Screenshot', key = hotkey_label('shot'), fn = function() mp.commandv('script-binding', 'doga/screenshot') end }
+  it[#it + 1] = { label = 'Copy frame', key = hotkey_label('copy'), fn = function() mp.commandv('script-binding', 'doga/copy-frame') end }
   return it
 end
 
@@ -1176,8 +1354,21 @@ local function cm_theme()
   return it
 end
 
+local function set_ontop(v)
+  cfg.ontop = v and true or false
+  mp.set_property_bool('ontop', cfg.ontop)
+  save_settings()
+  osd('info', 'Always on top', cfg.ontop and 'on' or 'off', nil, { off = not cfg.ontop })
+end
+
 local function start_update()
   if not st.update or st.update.state == 'downloading' then return end
+  if OPT.portable then
+    -- a portable folder is replaced by hand: show where the new zip is
+    mp.commandv('script-message-to', 'main', 'doga-open-url', 'https://github.com/invictus-1/Doga/releases/latest')
+    osd('info', 'Update', st.update.version, 'opening the download page')
+    return
+  end
   st.update.state, st.update.pct = 'downloading', 0
   mp.commandv('script-message-to', 'main', 'doga-update-install')
   osd('info', 'Update', 'downloading ' .. st.update.version)
@@ -1206,6 +1397,7 @@ local function cm_main()
     { label = 'Playlist', key = hotkey_label('playlist'), check = st.panel, fn = function() st.panel = not st.panel; apply_margin(); save_settings() end },
     { label = 'Info', key = hotkey_label('info'), check = st.info, disabled = nofile, fn = function() st.info = not st.info end },
     { label = 'Fullscreen', key = hotkey_label('full'), check = st.fs, fn = function() mp.commandv('cycle', 'fullscreen') end },
+    { label = 'Always on top', key = hotkey_label('ontop'), check = cfg.ontop, fn = function() set_ontop(not cfg.ontop) end },
     { sep = true },
     { label = 'Settings…', key = hotkey_label('settings'), fn = function() open_settings() end },
   }
@@ -1324,6 +1516,7 @@ local function apply_cfg()
   mp.set_property('resume-playback', cfg.resume and 'yes' or 'no')
   if cfg.audio_device and cfg.audio_device ~= '' then mp.set_property('audio-device', cfg.audio_device) end
   mp.set_property_number('audio-delay', cfg.audio_delay or 0)
+  mp.set_property_bool('ontop', cfg.ontop and true or false)
 end
 
 delay_text = function(d)
@@ -1350,6 +1543,7 @@ local HOTKEYS = {
   { id = 'vol-down', label = 'Volume down', key = 'DOWN', cmd = 'script-binding doga/vol-down' },
   { id = 'mute', label = 'Mute', key = 'm', cmd = 'script-binding doga/mute' },
   { id = 'full', label = 'Fullscreen', key = 'ENTER', cmd = 'no-osd cycle fullscreen' },
+  { id = 'ontop', label = 'Always on top', key = 't', cmd = 'script-binding doga/toggle-ontop' },
   { id = 'playlist', label = 'Playlist', key = 'p', cmd = 'script-binding doga/toggle-playlist' },
   { id = 'next', label = 'Next in playlist', key = 'PGDWN', cmd = 'no-osd playlist-next' },
   { id = 'prev', label = 'Previous in playlist', key = 'PGUP', cmd = 'no-osd playlist-prev' },
@@ -1362,6 +1556,7 @@ local HOTKEYS = {
   { id = 'start-over', label = 'Back to the start', key = 'HOME', cmd = 'script-binding doga/start-over' },
   { id = 'shot', label = 'Screenshot (picture only)', key = 's', cmd = 'script-binding doga/screenshot' },
   { id = 'shot-subs', label = 'Screenshot with subtitles', key = 'S', cmd = 'script-binding doga/screenshot-subs' },
+  { id = 'copy', label = 'Copy frame to clipboard', key = 'Ctrl+c', cmd = 'script-binding doga/copy-frame' },
   { id = 'frame-back', label = 'Previous frame', key = ',', cmd = 'no-osd frame-back-step' },
   { id = 'frame-fwd', label = 'Next frame', key = '.', cmd = 'no-osd frame-step' },
   { id = 'theme', label = 'Next theme', key = 'Ctrl+t', cmd = 'script-binding doga/cycle-theme' },
@@ -1577,6 +1772,7 @@ local function section_rows(name)
     rows[#rows + 1] = row('Build the playlist from the folder', 'Opening one episode lines up the rest of its series', onoff('autoplaylist'))
     rows[#rows + 1] = row('“Skip opening / ending” button', 'Shown while a chapter is an opening or ending', onoff('skip_button'))
     rows[#rows + 1] = row('Window', 'Opens where and how you left it: on the same monitor, maximized or fitted to the video. Fullscreen is always manual.', nil)
+    rows[#rows + 1] = row('Always on top', 'Keeps Dōga above other windows · ' .. hotkey_label('ontop'), onoff('ontop'))
     rows[#rows + 1] = row('Screenshots', hotkey_label('shot') .. ' saves the exact frame · ' .. hotkey_label('shot-subs') .. ' includes subtitles · Pictures › Dōga',
       function(rx, y, clip) sbutton(clip, 'set-open-shots', rx, y, 'Open folder') end, 64, 150)
   elseif name == 'Playback' then
@@ -1586,6 +1782,7 @@ local function section_rows(name)
     rows[#rows + 1] = row('Hardware decoding', 'Lighter on the CPU; the picture is identical either way', onoff('hwdec'))
     rows[#rows + 1] = lang_line('audio')
     rows[#rows + 1] = lang_line('sub')
+    rows[#rows + 1] = row('Same tracks for a whole series', 'The audio and subtitles you pick follow to the next episodes', onoff('series_tracks'))
   elseif name == 'Subtitles' then
     rows[#rows + 1] = row('Size', 'Scales plain and styled subtitles alike', function(rx, y, clip)
       seg(clip, 'sub_scale', rx, y, { { '80%', 0.8 }, { '90%', 0.9 }, { '100%', 1.0 }, { '115%', 1.15 }, { '130%', 1.3 } }, cfg.sub_scale)
@@ -1650,7 +1847,7 @@ local function section_rows(name)
       txt(x, y + 102 * s, 'Plays the file exactly as it was made.', { size = 14, color = T.muted, extra = clip })
       fill(rect(x, y + 132 * s - 1 * s, w, 1 * s), T.line, 0, clip)
     end }
-    local status = st.update_status or (st.update and ('Version ' .. st.update.version .. ' is available') or 'Checks GitHub at most once a day')
+    local status = st.update_status or (st.update and ('Version ' .. st.update.version .. ' is available') or 'Checks GitHub daily')
     rows[#rows + 1] = row('Updates', status, function(rx, y, clip)
       local bw
       if st.update then
@@ -1661,7 +1858,8 @@ local function section_rows(name)
       seg(clip, 'updates', rx - bw - 16 * s, y, { { 'Daily', true }, { 'Never', false } }, cfg.updates)
     end, 64, 400)
     rows[#rows + 1] = row('Engine', 'mpv ' .. (ENGINE.mpv or '') .. ' · FFmpeg ' .. (ENGINE.ffmpeg or '') .. ' · libplacebo (gpu-next, D3D11)', nil)
-    rows[#rows + 1] = row('Your settings', 'Settings, resume positions and recent files stay on this PC, in %APPDATA%\\Doga', function(rx, y, clip)
+    rows[#rows + 1] = row('Your settings', OPT.portable and 'Portable · kept in the data folder beside doga.exe'
+      or 'Settings, resume positions and recent files stay on this PC, in %APPDATA%\\Doga', function(rx, y, clip)
       sbutton(clip, 'set-open-data', rx, y, 'Open folder')
     end, 64, 150)
     rows[#rows + 1] = row('Source & licenses', 'MIT · bundles libmpv (GPL-2.0+) and OFL fonts', function(rx, y, clip)
@@ -1743,7 +1941,7 @@ local SET_ACT = {
   ['set-seg'] = function(z)
     local id, v = z.data.id, z.data.value
     cfg[id] = v
-    if id == 'updates' then st.update_status = v and 'Checks GitHub at most once a day' or 'Off · use “Check now” whenever you like' end
+    if id == 'updates' then st.update_status = v and 'Checks GitHub daily' or 'Off · check by hand' end
     apply_cfg(); save_settings()
   end,
   ['set-device'] = function(z) cfg.audio_device = z.data.name; apply_cfg(); save_settings() end,
@@ -1853,9 +2051,35 @@ local function remember()
   local entry = { path = g.path, pos = g.pos, dur = g.dur, watched = g.pos / g.dur > 0.92 }
   for i = #recent, 1, -1 do if recent[i].path == g.path then table.remove(recent, i) end end
   table.insert(recent, 1, entry)
-  while #recent > 20 do table.remove(recent) end
+  while #recent > 200 do table.remove(recent) end -- the start screen lists five; the rest feed the watched marks
   write_json(recent_path, recent)
 end
+
+-- The start screen's Continue row. Stopped partway: that file. Finished it: the host looks
+-- up what follows it in its series (answer in doga-next) and the first one not yet watched is offered.
+local function refresh_continue()
+  st.cont = nil
+  local r0 = recent[1]
+  if not r0 or not r0.path then return end
+  if not r0.watched then
+    if (r0.pos or 0) > 5 then st.cont = { path = r0.path, pos = r0.pos, dur = r0.dur } end
+    return
+  end
+  mp.commandv('script-message-to', 'main', 'doga-next', r0.path)
+end
+mp.register_script_message('doga-next', function(j)
+  local d = j and utils.parse_json(j)
+  local r0 = recent[1]
+  if type(d) ~= 'table' or not r0 or not r0.watched or d['for'] ~= r0.path then return end
+  for _, e in ipairs(d.next or {}) do
+    local rec = recent_for(e[1])
+    if not (rec and rec.watched) then
+      st.cont = { path = e[1], pos = rec and rec.pos or 0, dur = rec and rec.dur or 0, series = d.name }
+      break
+    end
+  end
+  request_render()
+end)
 
 ---------------------------------------------------------------------------
 -- Input
@@ -1900,12 +2124,12 @@ local ACTIONS = {
   ['chip-sub'] = function() st.menu = st.menu ~= 'chip-sub' and 'chip-sub' or nil end,
   trk = function(z)
     if z.data.kind == 'audio' then
-      mp.set_property_number('aid', z.data.id)
+      pick_track('audio', z.data.id)
       for _, t in ipairs(tracks_of('audio')) do if t.id == z.data.id then show_track_osd('audio', t) end end
     else
-      if z.data.id == 'no' then mp.set_property('sid', 'no'); show_track_osd('sub', nil)
+      if z.data.id == 'no' then pick_track('sub', 'no'); show_track_osd('sub', nil)
       else
-        mp.set_property_number('sid', z.data.id)
+        pick_track('sub', z.data.id)
         for _, t in ipairs(tracks_of('sub')) do if t.id == z.data.id then show_track_osd('sub', t) end end
       end
     end
@@ -2111,6 +2335,17 @@ local function screenshot(mode)
 end
 mp.add_key_binding(nil, 'screenshot', function() screenshot('video') end)
 mp.add_key_binding(nil, 'screenshot-subs', function() screenshot('subtitles') end)
+-- Ctrl+C: the same exact frame (no controls, no subtitles) onto the clipboard. The host does
+-- the copying and answers with doga-copied.
+mp.add_key_binding(nil, 'copy-frame', function()
+  if st.idle then return end
+  mp.commandv('script-message-to', 'main', 'doga-copy-frame')
+end)
+mp.register_script_message('doga-copied', function(state, w, h)
+  if state == 'ok' then osd('open', 'Frame copied', w .. ' × ' .. h, 'paste it anywhere')
+  else osd('open', 'Frame', 'couldn\'t be copied', nil, { off = true }) end
+end)
+mp.add_key_binding(nil, 'toggle-ontop', function() set_ontop(not cfg.ontop) end)
 mp.add_key_binding(nil, 'seek-back', function() mp.commandv('no-osd', 'seek', -cfg.seek_step) end, { repeatable = true })
 mp.add_key_binding(nil, 'seek-fwd', function() mp.commandv('no-osd', 'seek', cfg.seek_step) end, { repeatable = true })
 mp.add_key_binding(nil, 'context-menu', function()
@@ -2143,7 +2378,10 @@ obs('osd-dimensions', 'native', function(d)
   apply_margin()
 end)
 obs('display-hidpi-scale', 'number', function(v) st.s = math.max(1, v or 1) end)
-obs('idle-active', 'bool', function(v) st.idle = v and true or false end)
+obs('idle-active', 'bool', function(v)
+  st.idle = v and true or false
+  if st.idle then refresh_continue() end
+end)
 obs('pause', 'bool', function(v) st.paused = v end)
 obs('time-pos', 'number', function(v)
   st.pos = v or 0
@@ -2209,6 +2447,9 @@ end)
 obs('playlist', 'native', function(v) st.playlist = v or {} end)
 mp.register_script_message('doga-series', function(j)
   st.series = j and utils.parse_json(j) or nil
+  -- The series is only known now. If its remembered tracks couldn't be found by file name
+  -- while the file was loading, apply them late.
+  if st.path and series_done ~= st.path then series_apply(st.path, st.tracks) end
   request_render()
 end)
 obs('video-params', 'native', function(v)
@@ -2277,7 +2518,10 @@ mp.register_script_message('doga-demo-idle', function(v)
   render()
 end)
 mp.register_event('seek', function() st.last_move = mp.get_time(); request_render() end)
-mp.register_event('end-file', function() remember() end)
+mp.register_event('end-file', function()
+  remember()
+  if mp.get_property_bool('idle-active') then refresh_continue() end
+end)
 -- The host waits for this goodbye before it lets the engine go, so the last save always lands.
 mp.register_event('shutdown', function()
   remember(); save_settings()
@@ -2305,5 +2549,6 @@ do
   apply_cfg()
   apply_keys()
   recent = read_json(recent_path) or {}
+  refresh_continue()
   if mp.get_property('path') and mp.get_property_native('duration') then boot_intro() end
 end
