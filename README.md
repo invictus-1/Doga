@@ -82,7 +82,13 @@ To switch the check off, go to Settings › About › Updates › Never. "Check 
 
 ## Startup animation
 
-- **No file:** the start screen assembles itself from the design system's cover in about 1.3 s: a scanline sweep, the blocks sliding in, and the name glitching in. A click skips it.
+- **No file:** the start screen assembles itself in about 1.3 s, and a click skips it:
+  - a scanline sweep,
+  - HUD corner brackets drawing in, with labels typing beside them,
+  - the colour blocks sliding in and the seek-bar line filling,
+  - the name glitching in, with a divider drawing under it.
+
+  It's laid out on a proportional canvas, so a small window, a maximized one and fullscreen 4K all look the same.
 - **Opening a file:** the video starts immediately, and a neon frame traces the window edge over the first ~0.6 s.
 
 Nothing waits on either.

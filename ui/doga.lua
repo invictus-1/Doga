@@ -894,24 +894,33 @@ local function draw_idle(vw)
   local t = mp.get_time() - intro.idle_t0
   local ctx = K.new({ out = out, s = s, T = T, ui = OPT.ui, mono = OPT.mono })
 
-  local bw = math.min(vw * 0.5, 560 * s)
+  -- Everything here is laid out on a 1280×720 design canvas scaled to the window (u = px
+  -- per design px), so a small window, a maximized one and fullscreen 4K look the same.
+  local u = math.min(vw / 1280, h / 720)
+
+  local bw = 620 * u
   local bh = bw * 0.6
   ctx:intro_blocks(t, { x = vw - bw, y = 0, w = bw, h = bh })
+  ctx:intro_hud(t, vw, h, u, 'DŌGA  //  動画 PLAYER', 'v' .. OPT.version .. '  ·  GPU-NEXT  ·  D3D11')
 
-  local gx = 48 * s
-  local by = h - 40 * s
-  ctx:intro_name(t, 'Dōga', gx, by - 54 * s, 64, 0.35)
+  local gx = 76 * u
+  local name_y = h - 210 * u
+  ctx:intro_name(t, 'Dōga', gx, name_y, 128 * u / s, 0.35)
+  ctx:intro_rule(t, gx + 4 * u, name_y + 30 * u, 460 * u, u, 0.75)
   local a1 = 255 - K.span(t, 0.85, 1.15) * 255
-  local instr = 'Drop a file anywhere, or press  O  to open one.'
-  txt(gx, by - 8 * s, instr, { size = 14, color = T.muted, an = 1, alpha = a1 })
-  zone('idle-open', gx, by - 30 * s, text_w(instr, 14 * s), 24 * s)
+  local isz = math.max(13, 16 * u / s)
+  txt(gx + 4 * u, name_y + 74 * u, 'Plays the file exactly as it was made.', { size = isz, color = T.ink, an = 1, alpha = a1 })
+  local instr = 'Drop a file anywhere, or press  ' .. hotkey_label('open') .. '  to open one.'
+  txt(gx + 4 * u, name_y + 104 * u, instr, { size = isz, color = T.muted, an = 1, alpha = a1 })
+  zone('idle-open', gx, name_y + 80 * u, text_w(instr, isz * s), 28 * u)
+  local by = h - 64 * u
 
   -- a newer Dōga is out: one quiet chip, top-left
   if st.update then
     local label = st.update.state == 'downloading' and string.format('Downloading %s… %d%%', st.update.version, st.update.pct or 0)
       or ('Update to ' .. st.update.version)
     local uw, uh = text_w(label, 13 * s) + 52 * s, 36 * s
-    local ux, uy = gx, 32 * s
+    local ux, uy = 42 * u, 28 * u + 46 * u -- under the top-left HUD label
     local hov = within(ux, uy, uw, uh) and st.update.state ~= 'downloading'
     local ua = 255 - K.span(t, 1.0, 1.3) * 255
     fill(cut(ux, uy, uw, uh, 6 * s), hov and T.accent or T.surface1, ua)
@@ -922,25 +931,29 @@ local function draw_idle(vw)
   end
 
   if #recent > 0 then
+    -- scales with the window like the rest, but never smaller than normal UI text
+    local k = math.max(s, u)
+    local f = k / s -- font multiplier (txt sizes are css px × s)
+    local rh = ROW_H * k
     local split = vw >= 860 * s
     local rx = split and (vw / 2) or gx
     local n = math.min(5, #recent)
-    local top = split and (by - n * ROW_H * s) or (by - 150 * s - n * ROW_H * s)
-    while n > 0 and top < bh + 40 * s do n = n - 1; top = top + ROW_H * s end
+    local top = split and (by - n * rh) or (by - 150 * k - n * rh)
+    while n > 0 and top < bh + 40 * u + 20 * k do n = n - 1; top = top + rh end
     if n > 0 then
       local a2 = 255 - K.span(t, 0.95, 1.3) * 255
-      local rise = (1 - K.out_cubic(K.span(t, 0.95, 1.3))) * 8 * s
-      txt(rx + 12 * s, top - 14 * s + rise, 'RECENT', { size = 11, weight = 600, color = T.muted, extra = '\\fsp1.5', alpha = a2 })
-      local rw = vw - rx - 32 * s
+      local rise = (1 - K.out_cubic(K.span(t, 0.95, 1.3))) * 8 * k
+      txt(rx + 12 * k, top - 14 * k + rise, 'RECENT', { size = 11 * f, weight = 600, color = T.muted, extra = '\\fsp1.5', alpha = a2 })
+      local rw = vw - rx - 32 * k
       for i = 1, n do
         local rr = recent[i]
-        local y = top + (i - 1) * ROW_H * s + rise
-        if within(rx, y, rw, ROW_H * s) then fill(rect(rx, y, rw, ROW_H * s), T.surface2) end
-        ctx:icon('open', rx + 12 * s, y + 8 * s, 18 * s, T.muted, a2)
-        txt(rx + 40 * s, y + 17 * s, fit(basename(rr.path), rw - 52 * s, 14 * s), { size = 14, alpha = a2 })
+        local y = top + (i - 1) * rh + rise
+        if within(rx, y, rw, rh) then fill(rect(rx, y, rw, rh), T.surface2) end
+        ctx:icon('open', rx + 12 * k, y + 8 * k, 18 * k, T.muted, a2)
+        txt(rx + 40 * k, y + 17 * k, fit(basename(rr.path), rw - 52 * k, 14 * k), { size = 14 * f, alpha = a2 })
         local meta = rr.watched and 'Watched' or ('Stopped at ' .. short_time(rr.pos) .. (rr.dur and rr.dur > 0 and (' of ' .. short_time(rr.dur)) or ''))
-        txt(rx + 40 * s, y + 35 * s, meta, { size = 12, weight = 500, color = T.muted, alpha = a2 })
-        zone('recent', rx, y, rw, ROW_H * s, { path = rr.path })
+        txt(rx + 40 * k, y + 35 * k, meta, { size = 12 * f, weight = 500, color = T.muted, alpha = a2 })
+        zone('recent', rx, y, rw, rh, { path = rr.path })
       end
     end
   end

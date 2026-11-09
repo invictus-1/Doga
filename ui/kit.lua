@@ -197,8 +197,9 @@ function Ctx:intro_blocks(t, box)
   -- the seek-bar motif draws itself
   local tp = K.out_cubic(K.span(t, 0.55, 0.85))
   if tp > 0 then self:fill(K.rect(X(40), Y(254), 256 * k * tp, 4 * k), T.line) end
-  local pp = K.out_cubic(K.span(t, 0.75, 1.15))
-  if pp > 0 then self:fill(K.rect(X(40), Y(254), 160 * k * pp, 4 * k), T.accent) end
+  -- …and fills all the way: a finished bar, not a half-watched one
+  local pp = K.out_cubic(K.span(t, 0.75, 1.25))
+  if pp > 0 then self:fill(K.rect(X(40), Y(254), 256 * k * pp, 4 * k), T.accent) end
 end
 
 -- A horizontal scanline sweeping down the whole area, leaving nothing behind.
@@ -234,6 +235,55 @@ function Ctx:intro_name(t, name, x, y, size, t0)
     end
     cx = cx + K.text_w(ch, px) * 1.02
   end
+end
+
+-- HUD corners: L-brackets that draw in at two opposite corners, each with a small mono
+-- label typing in beside it. `u` is the layout unit (px per 1280×720 design px).
+function Ctx:intro_hud(t, w, h, u, top_label, bottom_label)
+  local T = self.T
+  local m, arm, th = 28 * u, 56 * u, math.max(1, 2 * u)
+  local p = K.out_expo(K.span(t, 0.12, 0.6))
+  if p <= 0 then return end
+  local a = 255 - K.span(t, 0.12, 0.3) * 255
+  -- top-left
+  self:fill(K.rect(m, m, arm * p, th), T.accent, a)
+  self:fill(K.rect(m, m, th, arm * p), T.accent, a)
+  -- bottom-right
+  self:fill(K.rect(w - m - arm * p, h - m - th, arm * p, th), T.accent, a)
+  self:fill(K.rect(w - m - th, h - m - arm * p, th, arm * p), T.accent, a)
+  -- tick marks along the brackets, like a reticle
+  for i = 1, 3 do
+    local q = K.span(t, 0.35 + i * 0.05, 0.5 + i * 0.05)
+    if q > 0 then
+      self:fill(K.rect(m + arm + 8 * u + (i - 1) * 10 * u, m, 4 * u, th), T.lineStrong, 255 - q * 255)
+      self:fill(K.rect(w - m - arm - 12 * u - (i - 1) * 10 * u, h - m - th, 4 * u, th), T.lineStrong, 255 - q * 255)
+    end
+  end
+  -- labels type in character by character
+  local function typed(s, a0)
+    local chars = utf8_chars(s)
+    local n = math.floor(#chars * K.span(t, a0, a0 + 0.45) + 0.5)
+    return table.concat(chars, '', 1, math.max(0, n)), n < #chars
+  end
+  local px = 11 * u / self.s
+  local s1, typing1 = typed(top_label, 0.45)
+  if s1 ~= '' then
+    self:txt(m + 14 * u, m + 22 * u, s1 .. (typing1 and '▌' or ''), { size = px, mono = true, weight = 500, color = T.muted, an = 4 })
+  end
+  local s2, typing2 = typed(bottom_label, 0.7)
+  if s2 ~= '' then
+    self:txt(w - m - 14 * u, h - m - 22 * u, s2 .. (typing2 and '▌' or ''), { size = px, mono = true, weight = 500, color = T.muted, an = 6 })
+  end
+end
+
+-- A rule that draws itself left to right with a bright head, then settles into `line`.
+function Ctx:intro_rule(t, x, y, w, u, t0)
+  local T = self.T
+  local p = K.out_cubic(K.span(t, t0, t0 + 0.45))
+  if p <= 0 then return end
+  local th = math.max(1, 2 * u)
+  self:fill(K.rect(x, y, w * p, th), T.accent)
+  if p < 1 then self:fill(K.rect(x + w * p - 24 * u, y, 24 * u, th), T.accentBright) end
 end
 
 -- File-open intro: a neon frame traces the window edge from the top-left, then fades.
