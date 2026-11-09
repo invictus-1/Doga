@@ -304,6 +304,17 @@ mod tests {
         assert!(!is_newer("garbage", "0.1.0"));
     }
 
+    // Network: read-only GET of the public "latest release" JSON. Run with --ignored.
+    #[test]
+    #[ignore]
+    fn live_latest_release_fetch() {
+        let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+        let body = https_get(&url, Some("application/vnd.github+json"), |_, _| {}).expect("GitHub reachable over WinHTTP");
+        let json = String::from_utf8_lossy(&body);
+        let tag = json_field(&json, "tag_name").expect("tag_name present");
+        eprintln!("latest release on GitHub: {tag}; signed installer: {}", parse_release(&json).is_some());
+    }
+
     #[test]
     fn picks_signed_installer_from_release_json() {
         let json = r#"{"tag_name":"v0.2.0","assets":[
