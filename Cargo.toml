@@ -1,0 +1,16 @@
+[package]
+name = "doga"
+version = "0.1.0"
+edition = "2021"
+description = "Dōga — a video player that plays the file exactly as it was made."
+publish = false
+
+# No dependencies on purpose: the host only loads libmpv, scans folders and opens a file dialog.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
