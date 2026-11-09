@@ -39,9 +39,14 @@ K.THEMES = {
 for i, t in ipairs(K.THEMES) do t.n = i end
 
 -- theme colours as ASS BGR
+local COLORS = {}
 function K.colors(i)
-  local t = {}
-  for k, v in pairs(K.THEMES[i].c) do t[k] = v:sub(5, 6) .. v:sub(3, 4) .. v:sub(1, 2) end
+  local t = COLORS[i]
+  if not t then
+    t = {}
+    for k, v in pairs(K.THEMES[i].c) do t[k] = v:sub(5, 6) .. v:sub(3, 4) .. v:sub(1, 2) end
+    COLORS[i] = t
+  end
   return t
 end
 -- index of a theme id (1 when unknown)
@@ -76,27 +81,68 @@ local function utf8_chars(s)
 end
 K.chars = utf8_chars
 
+-- Rough advance width (px): good enough for layout and ellipsis. Calibrated against Chakra
+-- Petch / JetBrains Mono as rendered by libass. These run for every label on every redraw, so
+-- they walk the bytes in place and build no tables.
+local byte = string.byte
+local ASCII_K = {}
+for b = 0, 127 do ASCII_K[b] = 0.47 end
+for b = byte('A'), byte('Z') do ASCII_K[b] = 0.56 end
+for ch in ('mwMW'):gmatch('.') do ASCII_K[byte(ch)] = 0.72 end
+for ch in ('ilI.,:;|!\' '):gmatch('.') do ASCII_K[byte(ch)] = 0.25 end
+-- end of the character that starts at i (a lead byte and the continuation bytes after it)
+local function char_end(s, i, n)
+  local j = i + 1
+  while j <= n do
+    local c = byte(s, j)
+    if c < 128 or c > 191 then break end
+    j = j + 1
+  end
+  return j - 1
+end
+-- width factor of the character s[i..j] whose first byte is b
+local function char_k(s, i, j, b, mono)
+  if j - i >= 2 then -- CJK / wide; the em dash is narrower
+    if j - i == 2 and b == 226 and byte(s, i + 1) == 128 and byte(s, i + 2) == 148 then return 0.62 end
+    return 1.0
+  end
+  if mono then return 0.6 end
+  return ASCII_K[b] or 0.47
+end
+
 function K.text_w(s, px, mono)
-  local w = 0
-  for _, ch in ipairs(utf8_chars(s)) do
-    if #ch >= 3 then w = w + px * (ch == '—' and 0.62 or ch == '·' and 0.3 or 1.0)
-    elseif mono then w = w + px * 0.6
-    elseif ch:match('[ilI%.,:;|!\' ]') then w = w + px * 0.25
-    elseif ch:match('[mwMW]') then w = w + px * 0.72
-    elseif ch:match('[A-Z]') then w = w + px * 0.56
-    else w = w + px * 0.47 end
+  local w, i, n = 0, 1, #s
+  while i <= n do
+    local b = byte(s, i)
+    if b <= 127 or (b >= 194 and b <= 244) then
+      local j = char_end(s, i, n)
+      w = w + px * char_k(s, i, j, b, mono)
+      i = j + 1
+    else
+      i = i + 1 -- a stray byte has no width
+    end
   end
   return w
 end
 
 function K.fit(s, maxw, px, mono)
   if K.text_w(s, px, mono) <= maxw then return s end
-  local acc, ell = {}, K.text_w('…', px, mono)
-  for _, ch in ipairs(utf8_chars(s)) do
-    acc[#acc + 1] = ch
-    if K.text_w(table.concat(acc), px, mono) + ell > maxw then acc[#acc] = nil; break end
+  -- keep the characters that fit beside the ellipsis (which is one px wide)
+  local w, i, n, keep, acc = 0, 1, #s, 0, nil
+  while i <= n do
+    local b = byte(s, i)
+    if b <= 127 or (b >= 194 and b <= 244) then
+      local j = char_end(s, i, n)
+      w = w + px * char_k(s, i, j, b, mono)
+      if w + px > maxw then break end
+      if acc then acc[#acc + 1] = s:sub(i, j) else keep = j end
+      i = j + 1
+    else
+      if not acc then acc = { s:sub(1, keep) } end -- stray bytes are dropped, so piece it together
+      i = i + 1
+    end
   end
-  return table.concat(acc) .. '…'
+  return (acc and table.concat(acc) or s:sub(1, keep)) .. '…'
 end
 
 -- path builders (absolute px)

@@ -106,6 +106,14 @@ fn main() {
 }
 
 fn run_player() {
+    // Debug builds with DOGA_MSG_LEVEL set also print how long each startup step took.
+    let t0 = std::time::Instant::now();
+    let timing = cfg!(debug_assertions) && std::env::var_os("DOGA_MSG_LEVEL").is_some();
+    let step = |what: &str| {
+        if timing {
+            eprintln!("[doga] startup: {what} at {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
+        }
+    };
     let exe = std::env::current_exe().unwrap_or_default();
     let exe_dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
 
@@ -157,6 +165,7 @@ fn run_player() {
         ipc::serve(tx);
     }
 
+    step("single-instance check done");
     let mpv = match Mpv::load(&dll) {
         Ok(m) => m,
         Err(e) => {
@@ -164,11 +173,14 @@ fn run_player() {
             return;
         }
     };
+    step("engine library loaded");
     configure(&mpv, &ui, &data, portable);
+    step("options set");
     if let Err(e) = mpv.initialize() {
         win::message_box("Dōga", &format!("Could not start the playback engine:\n{e}"));
         return;
     }
+    step("engine initialized");
     let mpv = Arc::new(mpv);
     let thumbs = thumbs::spawn(mpv.clone(), dll.clone());
 
@@ -185,6 +197,7 @@ fn run_player() {
         std::thread::spawn(move || ipc_loop(m, rx, had_args));
     }
 
+    step("event loop running");
     let mut dev = DevScript::from_env();
     loop {
         let ev = mpv.wait(dev.timeout());
@@ -312,17 +325,17 @@ fn find_up(start: &Path, rels: &[&str]) -> Option<PathBuf> {
     start.ancestors().take(5).flat_map(|d| rels.iter().map(move |r| d.join(r))).find(|p| p.is_file())
 }
 
-fn has_font(ui: &Path, prefix: &str) -> bool {
-    std::fs::read_dir(ui.join("fonts"))
-        .map(|rd| rd.filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().starts_with(prefix)))
-        .unwrap_or(false)
-}
 
 fn configure(m: &Mpv, ui: &Path, data: &Path, portable: bool) {
     let p = |x: &Path| x.to_string_lossy().replace('\\', "/");
-    let ui_font = if has_font(ui, "ChakraPetch") { "Chakra Petch" } else { "Segoe UI" };
-    let mono_font = if has_font(ui, "JetBrainsMono") { "JetBrains Mono" } else { "Consolas" };
-    let sub_font = if has_font(ui, "NotoSans") { "Noto Sans" } else { "Segoe UI Semibold" };
+    // which of the bundled fonts are there (one look at the folder)
+    let fonts: Vec<String> = std::fs::read_dir(ui.join("fonts"))
+        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    let has_font = |prefix: &str| fonts.iter().any(|f| f.starts_with(prefix));
+    let ui_font = if has_font("ChakraPetch") { "Chakra Petch" } else { "Segoe UI" };
+    let mono_font = if has_font("JetBrainsMono") { "JetBrains Mono" } else { "Consolas" };
+    let sub_font = if has_font("NotoSans") { "Noto Sans" } else { "Segoe UI Semibold" };
 
     // Isolation: ignore any mpv.conf / scripts on this machine. Dōga's behaviour is defined here.
     m.opt("config", "no");
@@ -334,7 +347,14 @@ fn configure(m: &Mpv, ui: &Path, data: &Path, portable: bool) {
     }
     if cfg!(debug_assertions) {
         m.opt("terminal", "yes");
-        m.opt("msg-level", "all=info");
+        // DOGA_MSG_LEVEL=all=v shows the engine's own timings (shader compiles, cache hits)
+        match std::env::var("DOGA_MSG_LEVEL") {
+            Ok(level) => {
+                m.opt("msg-level", &level);
+                m.opt("msg-time", "yes");
+            }
+            Err(_) => m.opt("msg-level", "all=info"),
+        }
     }
 
     // Window: fit the video to the screen, never upscale the window past 100%.
@@ -433,6 +453,11 @@ fn configure(m: &Mpv, ui: &Path, data: &Path, portable: bool) {
     // Resume where you stopped, with the tracks you picked.
     m.opt("save-position-on-quit", if resume { "yes" } else { "no" });
     m.opt("watch-later-dir", &p(&data.join("watch_later")));
+    // Compiled shaders are kept between launches. Without a folder the engine recompiles them on
+    // every start (about a third of a second before the first frame). It stores compiled code
+    // only, so the picture is the same with or without it.
+    m.opt("gpu-shader-cache", "yes");
+    m.opt("gpu-shader-cache-dir", &p(&data.join("cache")));
     m.opt("watch-later-options", "start,aid,sid,sub-delay");
 
     // Keys and chrome.
@@ -460,6 +485,14 @@ fn configure(m: &Mpv, ui: &Path, data: &Path, portable: bool) {
 
 /// When a single file is opened, fill the playlist with the rest of its series.
 fn on_file_loaded(m: &Mpv, data: &Path) {
+    let t0 = std::time::Instant::now();
+    fill_playlist(m, data);
+    if cfg!(debug_assertions) && std::env::var_os("DOGA_MSG_LEVEL").is_some() {
+        eprintln!("[doga] playlist filled in {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
+fn fill_playlist(m: &Mpv, data: &Path) {
     // Settings › General › "Build the playlist from the folder"
     if read_settings(data).contains("\"autoplaylist\":false") {
         return;
@@ -470,13 +503,13 @@ fn on_file_loaded(m: &Mpv, data: &Path) {
     if count != 1 || !file.is_file() {
         return;
     }
-    let dir_total = file
-        .parent()
-        .and_then(|d| std::fs::read_dir(d).ok())
-        .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| series::is_video(&e.path())).count())
-        .unwrap_or(1);
-
     let Some(s) = series::detect(file) else {
+        // no series: the folder is only counted for the playlist's footer
+        let dir_total = file
+            .parent()
+            .and_then(|d| std::fs::read_dir(d).ok())
+            .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| series::is_video(&e.path())).count())
+            .unwrap_or(1);
         publish_series(m, None, dir_total, &[(path.clone(), String::new())]);
         return;
     };

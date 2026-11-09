@@ -251,12 +251,15 @@ fn candidates(cleaned: &str) -> Vec<Cand> {
 struct Parsed {
     cleaned: String,
     cands: Vec<Cand>,
+    /// For each candidate, the normalized title before it: what names of one series share.
+    keys: Vec<String>,
 }
 
 fn parse(name: &str) -> Parsed {
     let cleaned = clean(name);
     let cands = candidates(&cleaned);
-    Parsed { cleaned, cands }
+    let keys = cands.iter().map(|c| norm_key(&cleaned[..c.start])).collect();
+    Parsed { cleaned, cands, keys }
 }
 
 /// Result of detection over a list of names.
@@ -272,16 +275,13 @@ pub struct Found {
 pub fn detect_names(current: usize, names: &[String]) -> Option<Found> {
     let parsed: Vec<Parsed> = names.iter().map(|n| parse(n)).collect();
     let me = &parsed[current];
-    let mut best: Option<(usize, &Cand, String)> = None; // (score, cand, key)
-    for c in &me.cands {
-        let key = norm_key(&me.cleaned[..c.start]);
+    let mut best: Option<(usize, &Cand, &String)> = None; // (score, cand, key)
+    for (c, key) in me.cands.iter().zip(&me.keys) {
         let score = parsed
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != current)
-            .filter(|(_, p)| {
-                p.cands.iter().any(|o| o.kind == c.kind && o.key != c.key && norm_key(&p.cleaned[..o.start]) == key)
-            })
+            .filter(|(_, p)| p.cands.iter().zip(&p.keys).any(|(o, k)| o.kind == c.kind && o.key != c.key && k == key))
             .count();
         // more varying siblings wins; on a tie the later (rightmost) token wins
         if best.as_ref().map_or(true, |(s, b, _)| score > *s || (score == *s && c.start > b.start)) {
@@ -296,10 +296,7 @@ pub fn detect_names(current: usize, names: &[String]) -> Option<Found> {
         .iter()
         .enumerate()
         .filter_map(|(i, p)| {
-            p.cands
-                .iter()
-                .find(|o| o.kind == cand.kind && norm_key(&p.cleaned[..o.start]) == key)
-                .map(|o| (i, o))
+            p.cands.iter().zip(&p.keys).find(|(o, k)| o.kind == cand.kind && *k == key).map(|(o, _)| (i, o))
         })
         .collect();
     members.sort_by(|a, b| a.1.key.cmp(&b.1.key).then_with(|| natural_cmp(&names[a.0], &names[b.0])));

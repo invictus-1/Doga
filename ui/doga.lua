@@ -45,8 +45,20 @@ local st = {
 local settings_path = OPT.datadir ~= '' and utils.join_path(OPT.datadir, 'settings.json') or nil
 local recent_path = OPT.datadir ~= '' and utils.join_path(OPT.datadir, 'recent.json') or nil
 local recent = {}
-local function recent_for(path)
-  for _, r0 in ipairs(recent) do if r0.path == path then return r0 end end
+-- recent by path. The index is rebuilt when the list changed: every change either swaps the
+-- table (load) or puts a new entry first (remember).
+local recent_for
+do
+  local idx, of, head
+  recent_for = function(path)
+    if of ~= recent or head ~= recent[1] then
+      idx, of, head = {}, recent, recent[1]
+      for _, r0 in ipairs(recent) do
+        if r0.path ~= nil and idx[r0.path] == nil then idx[r0.path] = r0 end
+      end
+    end
+    return idx[path]
+  end
 end
 
 local function parse_file(p)
@@ -114,35 +126,8 @@ local function esc(s)
   s = tostring(s or '')
   return (s:gsub('\\', '\\\239\187\191'):gsub('{', '\\{'):gsub('\n', ' '))
 end
-local function utf8_chars(s)
-  local out = {}
-  for ch in s:gmatch('[%z\1-\127\194-\244][\128-\191]*') do out[#out + 1] = ch end
-  return out
-end
--- rough advance width (px) — good enough for layout and ellipsis
-local function text_w(s, px, mono)
-  local w = 0
-  for _, ch in ipairs(utf8_chars(s)) do
-    -- calibrated against Chakra Petch / JetBrains Mono as rendered by libass
-    if #ch >= 3 then w = w + px * (ch == '—' and 0.62 or ch == '·' and 0.3 or 1.0) -- CJK / wide
-    elseif mono then w = w + px * 0.6
-    elseif ch:match('[ilI%.,:;|!\' ]') then w = w + px * 0.25
-    elseif ch:match('[mwMW]') then w = w + px * 0.72
-    elseif ch:match('[A-Z]') then w = w + px * 0.56
-    else w = w + px * 0.47 end
-  end
-  return w
-end
-local function fit(s, maxw, px, mono)
-  if text_w(s, px, mono) <= maxw then return s end
-  local chars, acc = utf8_chars(s), {}
-  local ell = text_w('…', px, mono)
-  for _, ch in ipairs(chars) do
-    acc[#acc + 1] = ch
-    if text_w(table.concat(acc), px, mono) + ell > maxw then acc[#acc] = nil; break end
-  end
-  return table.concat(acc) .. '…'
-end
+-- rough advance width (px) and ellipsis: the kit's, shared with the installer
+local text_w, fit = K.text_w, K.fit
 local function fmt_time(t)
   t = math.max(0, math.floor(t or 0))
   return string.format('%02d:%02d:%02d', math.floor(t / 3600), math.floor(t / 60) % 60, t % 60)
@@ -369,7 +354,11 @@ for _, t in ipairs({ '2160p', '1440p', '1080p', '1080i', '720p', '576p', '480p',
   'ddp5.1', 'dd5.1', 'truehd', 'atmos', '10bit', '10-bit', '8bit', '8-bit', 'hi10p', 'web-dl', 'webdl', 'webrip', 'bluray',
   'blu-ray', 'bdrip', 'brrip', 'remux', 'hdtv', 'dvdrip', 'repack', 'proper' }) do TAGS[t] = true end
 
-local function basename(p) return (p or ''):match('([^/\\]+)$') or p or '' end
+local function basename(p)
+  p = p or ''
+  local b = p:match('^.*[/\\](.*)$') -- anchored: one pass, however long the path
+  return b and b ~= '' and b or p
+end
 local function trim_seps(s)
   local changed = true
   while changed do
@@ -381,30 +370,58 @@ local function trim_seps(s)
   end
   return s
 end
-local function clean_title(name)
-  local s = basename(name):gsub('%.%w%w?%w?%w?%w?$', '')
-  s = s:gsub('%b[]', ' '):gsub('%b()', ' '):gsub('%b{}', ' '):gsub('【.-】', ' ')
-  s = s:gsub('_', ' '):gsub('(%d)%.(%d%d?)%f[^%w]', '%1\1%2'):gsub('%.', ' '):gsub('\1', '.')
-  local words = {}
-  for w in s:gmatch('%S+') do
-    local lw = w:lower()
-    if TAGS[lw] or (lw:find('-', 1, true) and TAGS[lw:match('^[^-]+')]) then break end
-    words[#words + 1] = w
+-- Titles and tokens are worked out once per name: the playlist asks for them on every redraw.
+local clean_title, guess_token
+do
+  local TITLES, TOKENS, memo_n = {}, {}, 0
+  local function memo_room()
+    memo_n = memo_n + 1
+    if memo_n > 4000 then TITLES, TOKENS, memo_n = {}, {}, 0 end
   end
-  local t = trim_seps(table.concat(words, ' '))
-  return t ~= '' and t or basename(name)
-end
-local function guess_token(title)
-  local s, e = title:match('[Ss](%d+)[Ee](%d+)')
-  if s then
-    s, e = tonumber(s), tonumber(e)
-    return s <= 1 and string.format('E%02d', e) or string.format('S%02dE%02d', s, e)
+  local function clean_title_of(name)
+    local s = basename(name):gsub('%.%w%w?%w?%w?%w?$', '')
+    s = s:gsub('%b[]', ' '):gsub('%b()', ' '):gsub('%b{}', ' '):gsub('【.-】', ' ')
+    s = s:gsub('_', ' '):gsub('(%d)%.(%d%d?)%f[^%w]', '%1\1%2'):gsub('%.', ' '):gsub('\1', '.')
+    local words = {}
+    for w in s:gmatch('%S+') do
+      local lw = w:lower()
+      if TAGS[lw] or (lw:find('-', 1, true) and TAGS[lw:match('^[^-]+')]) then break end
+      words[#words + 1] = w
+    end
+    local t = trim_seps(table.concat(words, ' '))
+    return t ~= '' and t or basename(name)
   end
-  local last
-  for num in title:gmatch('%f[%w]%a*(%d+%.?%d*)%f[^%w.]') do last = num end
-  if last then return last end
-  local letter = title:match('[%s%-](%a)$')
-  return letter and letter:upper() or nil
+  function clean_title(name)
+    if name == nil then return clean_title_of(name) end
+    local t = TITLES[name]
+    if not t then
+      memo_room()
+      t = clean_title_of(name)
+      TITLES[name] = t
+    end
+    return t
+  end
+  local function guess_token_of(title)
+    local s, e = title:match('[Ss](%d+)[Ee](%d+)')
+    if s then
+      s, e = tonumber(s), tonumber(e)
+      return s <= 1 and string.format('E%02d', e) or string.format('S%02dE%02d', s, e)
+    end
+    local last
+    for num in title:gmatch('%f[%w]%a*(%d+%.?%d*)%f[^%w.]') do last = num end
+    if last then return last end
+    local letter = title:match('[%s%-](%a)$')
+    return letter and letter:upper() or nil
+  end
+  function guess_token(title)
+    local t = TOKENS[title]
+    if t == nil then
+      memo_room()
+      t = guess_token_of(title) or false
+      TOKENS[title] = t
+    end
+    return t or nil
+  end
 end
 local function entry_info(e)
   local path = e.filename
@@ -534,6 +551,9 @@ local BAR_H, TOP_H, PANEL_W, ROW_H = 80, 48, 320, 48
 
 local function panel_w() return st.panel and r(PANEL_W * st.s) or 0 end
 local function apply_margin()
+  -- opening the panel brings the playing entry to the middle of the list
+  if st.panel and not st.panel_was then st.follow = 'center' end
+  st.panel_was = st.panel
   local ratio = (st.panel and st.w > 0) and (panel_w() / st.w) or 0
   mp.set_property_number('video-margin-ratio-right', ratio)
 end
@@ -698,13 +718,15 @@ local function draw_bar(vw)
   if st.dur > 0 then
     local played = (dragging and st.drag.t or st.pos) / st.dur
     local buf = math.min(1, math.max(played, (st.cache or 0) / st.dur))
-    fill(rect(sx, ty, sw * buf, th), T.lineStrong)
-    fill(rect(sx, ty, sw * played, th), T.accent)
+    -- whole pixels: the bar is redrawn when it moves a pixel, not four times per pixel
+    local pw = r(sw * played)
+    fill(rect(sx, ty, r(sw * buf), th), T.lineStrong)
+    fill(rect(sx, ty, pw, th), T.accent)
     for _, c in ipairs(st.chapters) do
       if c.time > 0 and c.time < st.dur then fill(rect(sx + sw * c.time / st.dur - 1 * s, ty, 2 * s, th), T.surface0) end
     end
     if active then
-      kctx():thumb(sx + sw * played, ty + th / 2, 7 * s, T.accentBright)
+      kctx():thumb(sx + pw, ty + th / 2, 7 * s, T.accentBright)
       local hx = math.max(sx, math.min(sx + sw, st.mx))
       fill(rect(hx - 1 * s, ty - 2 * s, 2 * s, th + 4 * s), T.signal)
       local t = dragging and st.drag.t or seek_time_at(sx, sw)
@@ -877,11 +899,28 @@ local function draw_panel()
   local ly, lh = TOP_H * s + 4 * s, fy - TOP_H * s - 8 * s
   local rh = ROW_H * s
   local max_scroll = math.max(0, n * rh - lh)
+  -- Follow the playing entry: when it changes (or the panel has just opened) and it isn't in
+  -- view with a row to spare on each side, put it in the middle. Scrolling by hand is left
+  -- alone until the next change.
+  if st.follow and not st.drag then
+    local c = st.pl_cur
+    if c then
+      local top = (c - 1) * rh
+      if st.follow == 'center' or top - rh < st.scroll or top + 2 * rh > st.scroll + lh then
+        st.scroll = math.floor((top - (lh - rh) / 2) / rh + 0.5) * rh
+      end
+    end
+    st.follow = nil
+  end
   st.scroll = math.max(0, math.min(st.scroll, max_scroll))
   zone('pl-list', x0, ly, pw, lh)
   local clip = string.format('\\clip(%d,%d,%d,%d)', r(x0), r(ly), r(st.w), r(ly + lh))
   local drag = st.drag and st.drag.id == 'row' and st.drag.moved and st.drag
-  for i, e in ipairs(st.playlist) do
+  -- only the rows in view (one spare each side; the test below is the exact one)
+  local first = math.max(1, math.floor(st.scroll / rh))
+  local last = math.min(n, math.ceil((st.scroll + lh) / rh) + 1)
+  for i = first, last do
+    local e = st.playlist[i]
     local y = ly + (i - 1) * rh - st.scroll
     if y + rh > ly and y < ly + lh then
       local title, token = entry_info(e)
@@ -1983,8 +2022,10 @@ local function lift_subs(vis)
   end
 end
 
+local bench = { renders = 0, pushes = 0, t0 = 0 }
 render = function()
   if st.w <= 0 or st.h <= 0 then return end
+  bench.renders = bench.renders + 1
   out, zones = {}, {}
   local now = mp.get_time()
   local vw = st.w - panel_w()
@@ -2017,6 +2058,7 @@ render = function()
     ov.res_x, ov.res_y = st.w, st.h
     ov.data = data
     ov:update()
+    bench.pushes = bench.pushes + 1
   end
   thumb_sync()
 end
@@ -2444,7 +2486,14 @@ mp.register_script_message('doga-drop', function(x, y, ...)
     for i, f in ipairs(media) do mp.commandv('loadfile', f, i == 1 and 'replace' or 'append') end
   end
 end)
-obs('playlist', 'native', function(v) st.playlist = v or {} end)
+obs('playlist', 'native', function(v)
+  st.playlist = v or {}
+  local cur
+  for i, e in ipairs(st.playlist) do
+    if e.current or e.playing then cur = i; break end
+  end
+  if cur ~= st.pl_cur then st.pl_cur = cur; st.follow = st.follow or true end
+end)
 mp.register_script_message('doga-series', function(j)
   st.series = j and utils.parse_json(j) or nil
   -- The series is only known now. If its remembered tracks couldn't be found by file name
@@ -2475,6 +2524,7 @@ mp.register_event('file-loaded', boot_intro)
 local check_resume = false
 mp.register_event('file-loaded', function()
   st.error = nil
+  st.follow = st.follow or true
   check_resume = true
 end)
 mp.register_event('playback-restart', function()
@@ -2516,6 +2566,36 @@ mp.register_script_message('doga-demo-idle', function(v)
   st.demo_idle = v == 'on'
   intro.idle_t0 = nil
   render()
+end)
+-- Development: `script-message-to doga doga-bench 300 <label>` logs how many redraws ran and how
+-- many reached the screen since the last call, then times rebuilding the UI as it is right now.
+mp.register_script_message('doga-bench', function(n, label)
+  n = tonumber(n) or 200
+  local now = mp.get_time()
+  local span, renders, pushes = now - bench.t0, bench.renders, bench.pushes
+  -- a label starting with "prof" also samples where the time goes (LuaJIT only)
+  local okp, prof = pcall(require, 'jit.profile')
+  local hits, total = {}, 0
+  if okp and (label or ''):find('^prof') then
+    jit.off(); jit.flush() -- interpreted, so every sample lands on the function that ran
+    prof.start('i1', function(th)
+      local at = prof.dumpstack(th, 'f < ', 3)
+      hits[at] = (hits[at] or 0) + 1; total = total + 1
+    end)
+  else okp = false end
+  local t0 = mp.get_time()
+  for _ = 1, n do render() end
+  local ms = (mp.get_time() - t0) * 1000 / n
+  if okp then
+    prof.stop(); jit.on()
+    local rows = {}
+    for at, c in pairs(hits) do rows[#rows + 1] = { at, c } end
+    table.sort(rows, function(a, b) return a[2] > b[2] end)
+    for i = 1, math.min(25, #rows) do msg.info(string.format('  %5.1f%%  %s', rows[i][2] * 100 / total, rows[i][1])) end
+  end
+  msg.info(string.format('bench %s: %.3f ms per redraw (%d runs, %d bytes) · since last: %d redraws, %d drawn, %.1f s',
+    label or '', ms, n, #(ov.data or ''), renders, pushes, span))
+  bench.renders, bench.pushes, bench.t0 = 0, 0, mp.get_time()
 end)
 mp.register_event('seek', function() st.last_move = mp.get_time(); request_render() end)
 mp.register_event('end-file', function()
