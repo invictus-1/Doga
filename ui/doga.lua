@@ -18,32 +18,15 @@ local K = require 'kit'
 local SCRIPT_T0 = mp.get_time()
 
 ---------------------------------------------------------------------------
--- Themes (tokens.json). Hex is RRGGBB; ASS wants BBGGRR.
+-- Themes: palettes and each theme's signature (motif, thumb, trim, cover) live in kit.lua.
 ---------------------------------------------------------------------------
-local THEMES = {
-  { id = 'nightshade', name = 'Nightshade', c = {
-    surface0 = '0b0912', surface1 = '13101d', surface2 = '1c1729', scrim = '07050c', line = '2e2642',
-    lineStrong = '4a3d6b', ink = 'ece8f6', muted = 'a69cc0', faint = '6f6689', accent = 'b57bff',
-    accentStrong = '8a3dff', accentBright = 'd4b3ff', onAccent = '0b0912', signal = '3ee6ff', danger = 'ff5c7a' } },
-  { id = 'glacier', name = 'Glacier', c = {
-    surface0 = '05090c', surface1 = '0b141a', surface2 = '122029', scrim = '020609', line = '1e3340',
-    lineStrong = '2f5163', ink = 'e3f4fa', muted = '8fb3c2', faint = '557583', accent = '3ee0ff',
-    accentStrong = '0fb5d9', accentBright = 'a8f1ff', onAccent = '05090c', signal = 'c38bff', danger = 'ff6b6b' } },
-  { id = 'redline', name = 'Redline', c = {
-    surface0 = '0c0608', surface1 = '170c10', surface2 = '221218', scrim = '080305', line = '3a1d27',
-    lineStrong = '5e2f3f', ink = 'f8e9ee', muted = 'c49aa8', faint = '7e5b66', accent = 'ff3d7f',
-    accentStrong = 'e01e63', accentBright = 'ffb3cc', onAccent = '0c0608', signal = 'ffb547', danger = 'ffd23f' } },
-  { id = 'carbon', name = 'Carbon', c = {
-    surface0 = '000000', surface1 = '0a0a0a', surface2 = '161616', scrim = '000000', line = '2a2a2a',
-    lineStrong = '444444', ink = 'ffffff', muted = 'b3b3b3', faint = '6b6b6b', accent = 'e6e6e6',
-    accentStrong = 'bfbfbf', accentBright = 'ffffff', onAccent = '000000', signal = 'b57bff', danger = 'ff5c7a' } },
-}
+local THEMES = K.THEMES
 local SCRIM_A = 0x38 -- 78% opaque
-local T, theme_i = {}, 1
+local T, TH, theme_i = {}, K.THEMES[1], 1
 local function set_theme(i)
   theme_i = ((i - 1) % #THEMES) + 1
-  T = {}
-  for k, v in pairs(THEMES[theme_i].c) do T[k] = v:sub(5, 6) .. v:sub(3, 4) .. v:sub(1, 2) end
+  TH = THEMES[theme_i]
+  T = K.colors(theme_i)
 end
 set_theme(1)
 
@@ -65,17 +48,31 @@ local function recent_for(path)
   for _, r0 in ipairs(recent) do if r0.path == path then return r0 end end
 end
 
+local function parse_file(p)
+  local f = io.open(p, 'rb'); if not f then return nil, false end
+  local s = f:read('*a'); f:close()
+  return (utils.parse_json(s)), true
+end
 local function read_json(p)
   if not p then return nil end
-  local f = io.open(p, 'rb'); if not f then return nil end
-  local s = f:read('*a'); f:close()
-  return utils.parse_json(s)
+  local t, there = parse_file(p)
+  if t then return t end
+  -- Damaged, or a save was cut short: take the copy that was being written, else the one
+  -- before it. (A file that was simply deleted stays deleted: that is how settings are reset.)
+  local tmp, has_tmp = parse_file(p .. '.tmp')
+  if not there and not has_tmp then return nil end
+  return tmp or (parse_file(p .. '.bak'))
 end
+-- Never leaves the file half-written: the new one is written beside it and swapped in, and the
+-- previous one stays as .bak.
 local function write_json(p, t)
   if not p then return end
   local s = utils.format_json(t); if not s then return end
   local f = io.open(p .. '.tmp', 'wb'); if not f then return end
-  f:write(s); f:close(); os.remove(p); os.rename(p .. '.tmp', p)
+  local ok = f:write(s)
+  f:close()
+  if not ok then os.remove(p .. '.tmp'); return end
+  os.remove(p .. '.bak'); os.rename(p, p .. '.bak'); os.rename(p .. '.tmp', p)
 end
 -- Everything the Settings page edits. Defaults are what Dōga does out of the box.
 local cfg = {
@@ -157,7 +154,7 @@ end
 ---------------------------------------------------------------------------
 local out, zones = {}, {}
 local function P(v) return r(v * 4) end
-local function A(a) return string.format('%02X', a or 0) end
+local A = K.A
 local function poly(pts)
   local t = { 'm', P(pts[1]), P(pts[2]) }
   for i = 3, #pts, 2 do t[#t + 1] = (i == 3) and 'l' or ''; t[#t + 1] = P(pts[i]); t[#t + 1] = P(pts[i + 1]) end
@@ -184,6 +181,8 @@ local function circle(cx, cy, rad)
     P(cx - k), P(cy + rad), P(cx - rad), P(cy + k), P(cx - rad), P(cy))
 end
 local function diamond(cx, cy, rad) return poly({ cx, cy - rad, cx + rad, cy, cx, cy + rad, cx - rad, cy }) end
+-- kit's drawing context on this frame, for the pieces a theme shapes (motif, thumb, trim)
+local function kctx() return K.new({ out = out, s = st.s, T = T, theme = TH, ui = OPT.ui, mono = OPT.mono }) end
 
 -- CSS px → ASS \fs (libass sizes by full line height)
 -- (measured: Chakra Petch needs ~1.6, JetBrains Mono ~1.2 to match CSS px)
@@ -293,7 +292,7 @@ local function chip_label(kind)
   local code = (t.lang and t.lang ~= '' and t.lang:sub(1, 3):upper()) or ((kind == 'audio' and 'A' or 'S') .. t.id)
   if kind == 'audio' then
     local ch = t['demux-channel-count']
-    if ch and #tracks_of('audio') > 0 then return code .. ' ' .. (CHANNELS[ch] or ch .. 'ch') end
+    if ch then return code .. ' ' .. (CHANNELS[ch] or ch .. 'ch') end
   end
   return code
 end
@@ -438,12 +437,17 @@ local function ibtn(id, x, y, name, o)
   zone(id, x, y, size, size, o.data)
 end
 
-local function chip(id, right_x, cy, icon_name, label, key)
+local function chip_w(label, key)
   local s = st.s
   local tw = text_w(label, 12 * s)
   -- the key box fits whatever key is assigned (and disappears if none is)
   local kw = (key and key ~= '') and math.max(14 * s, text_w(key, 10 * s, true) + 6 * s) or 0
-  local w = 8 * s + 16 * s + 4 * s + tw + (kw > 0 and (6 * s + kw) or 0) + 8 * s
+  return 8 * s + 16 * s + 4 * s + tw + (kw > 0 and (6 * s + kw) or 0) + 8 * s, tw, kw
+end
+
+local function chip(id, right_x, cy, icon_name, label, key)
+  local s = st.s
+  local w, tw, kw = chip_w(label, key)
   local x, y, h = right_x - w, cy - 14 * s, 28 * s
   local hov = within(x, y, w, h) or st.menu == id
   fill(cut(x, y, w, h, 4 * s), hov and T.line or T.surface2)
@@ -462,7 +466,10 @@ local function draw_top(vw)
   local s = st.s
   fill(rect(0, 0, vw, TOP_H * s), T.scrim, SCRIM_A)
   zone('topbar', 0, 0, vw, TOP_H * s)
-  txt(16 * s, 24 * s, fit(st.title, vw - 32 * s, 18 * s), { size = 18, weight = 600 })
+  -- the theme's signature closes the bar on the right
+  local sig = vw >= 420 * s and 72 * s or 0
+  if sig > 0 then kctx():motif(vw - 16 * s - sig, 20 * s, sig, 8 * s, T.lineStrong) end
+  txt(16 * s, 24 * s, fit(st.title, vw - 32 * s - (sig > 0 and sig + 16 * s or 0), 18 * s), { size = 18, weight = 600 })
 end
 
 local function seek_time_at(sx, sw)
@@ -477,7 +484,7 @@ local thumbs = { path = nil, map = {}, requested = nil, shown = nil }
 
 local function thumb_step() return math.max(1, st.dur / 300) end
 
-function thumb_geometry()
+local function thumb_geometry()
   if not st.video or st.dur <= 0 then return nil end
   local w = r(192 * st.s / 2) * 2
   local h = r(w / st.video.aspect / 2) * 2
@@ -498,7 +505,11 @@ local function thumb_sync()
     if thumbs.shown then mp.command_native({ 'overlay-remove', THUMB_ID }); thumbs.shown = nil end
     return
   end
-  if thumbs.path ~= st.path then thumb_reset(); thumbs.path = st.path end
+  -- another file, or another preview size (the window moved to a display with another scale)
+  if thumbs.path ~= st.path or thumbs.w ~= want.w or thumbs.h ~= want.h then
+    thumb_reset()
+    thumbs.path, thumbs.w, thumbs.h = st.path, want.w, want.h
+  end
   local step = thumb_step()
   local key = math.floor(want.t / step)
   local th = thumbs.map[key]
@@ -562,7 +573,7 @@ local function draw_bar(vw)
       if c.time > 0 and c.time < st.dur then fill(rect(sx + sw * c.time / st.dur - 1 * s, ty, 2 * s, th), T.surface0) end
     end
     if active then
-      fill(circle(sx + sw * played, ty + th / 2, 7 * s), T.accentBright)
+      kctx():thumb(sx + sw * played, ty + th / 2, 7 * s, T.accentBright)
       local hx = math.max(sx, math.min(sx + sw, st.mx))
       fill(rect(hx - 1 * s, ty - 2 * s, 2 * s, th + 4 * s), T.signal)
       local t = dragging and st.drag.t or seek_time_at(sx, sw)
@@ -595,31 +606,57 @@ local function draw_bar(vw)
   end
   zone('seek', sx - 8 * s, sy, sw + 16 * s, 24 * s, { sx = sx, sw = sw })
 
-  -- controls row
+  -- controls row. A narrow window sheds what it can do without, in this order: the key hints
+  -- on the chips, the total time, the volume slider (the wheel still works), then the chips
+  -- (B, V and the right-click menu still work).
   local ry = by + 32 * s
   local cy = ry + 20 * s
+  local now_s = fmt_time(st.drag and st.drag.id == 'seek' and st.drag.t or st.pos)
+  local dur_s = fmt_time(st.dur)
+  local sub_l, aud_l = chip_label('sub'), chip_label('audio')
+  local sub_k, aud_k = hotkey_label('sub'), hotkey_label('audio')
+  local show_dur, show_vol, show_chips = true, true, true
+  local function need()
+    local left = (16 + 44 + 40 + 44 + 44 + (show_vol and 88 or 0)) * s
+      + text_w(show_dur and (now_s .. ' / ' .. dur_s) or now_s, 13 * s, true)
+    local right = (16 + 120) * s
+    if show_chips then right = right + 8 * s + chip_w(sub_l, sub_k) + 8 * s + chip_w(aud_l, aud_k) end
+    return left + 16 * s + right
+  end
+  if need() > vw then sub_k, aud_k = nil, nil end
+  if need() > vw then show_dur = false end
+  if need() > vw then show_vol = false end
+  if need() > vw then
+    show_chips = false
+    -- with the chips gone there may be room for the slider again
+    show_vol = true
+    if need() > vw then show_vol = false end
+  end
   local x = 16 * s
   ibtn('play', x, ry, st.paused and 'play' or 'pause', { primary = true }); x = x + 44 * s
   ibtn('back', x, ry, 'back'); x = x + 40 * s
   ibtn('fwd', x, ry, 'fwd'); x = x + 44 * s
   ibtn('mute', x, ry, st.mute and 'mute' or 'vol'); x = x + 44 * s
-  local vtw = 72 * s
-  fill(rect(x, cy - 2 * s, vtw, 4 * s), T.line)
-  fill(rect(x, cy - 2 * s, vtw * math.min(1, st.volume / 100), 4 * s), st.mute and T.muted or T.ink)
-  if st.volume > 100 then fill(rect(x + vtw - 2 * s, cy - 5 * s, 2 * s, 10 * s), T.accent) end
-  zone('vol', x - 4 * s, cy - 10 * s, vtw + 8 * s, 20 * s, { x = x, w = vtw })
-  x = x + vtw + 16 * s
-  local now_s = fmt_time(st.drag and st.drag.id == 'seek' and st.drag.t or st.pos)
-  txt(x, cy, now_s .. '{\\1c&H' .. T.muted .. '&}\\h/\\h' .. fmt_time(st.dur), { size = 13, mono = true, weight = 500, raw = true })
+  if show_vol then
+    local vtw = 72 * s
+    fill(rect(x, cy - 2 * s, vtw, 4 * s), T.line)
+    fill(rect(x, cy - 2 * s, vtw * math.min(1, st.volume / 100), 4 * s), st.mute and T.muted or T.ink)
+    if st.volume > 100 then fill(rect(x + vtw - 2 * s, cy - 5 * s, 2 * s, 10 * s), T.accent) end
+    zone('vol', x - 4 * s, cy - 10 * s, vtw + 8 * s, 20 * s, { x = x, w = vtw })
+    x = x + vtw + 16 * s
+  end
+  txt(x, cy, now_s .. (show_dur and ('{\\1c&H' .. T.muted .. '&}\\h/\\h' .. dur_s) or ''), { size = 13, mono = true, weight = 500, raw = true })
 
   local rx = vw - 16 * s
   rx = rx - 40 * s; ibtn('full', rx, ry, st.fs and 'exitfull' or 'full')
   rx = rx - 40 * s; ibtn('playlist', rx, ry, 'list', { on = st.panel })
   rx = rx - 40 * s; ibtn('info', rx, ry, 'info', { on = st.info })
-  rx = rx - 8 * s
-  local w2 = chip('chip-sub', rx, cy, 'subs', chip_label('sub'), hotkey_label('sub'))
-  rx = rx - w2 - 8 * s
-  chip('chip-audio', rx, cy, 'audio', chip_label('audio'), hotkey_label('audio'))
+  if show_chips then
+    rx = rx - 8 * s
+    local w2 = chip('chip-sub', rx, cy, 'subs', sub_l, sub_k)
+    rx = rx - w2 - 8 * s
+    chip('chip-audio', rx, cy, 'audio', aud_l, aud_k)
+  end
 end
 
 local function draw_menu(vw)
@@ -628,7 +665,6 @@ local function draw_menu(vw)
                  { kind = 'sub', label = 'Subtitles · ' .. hotkey_label('sub'), items = tracks_of('sub') } }
   table.insert(cols[2].items, 1, { off = true, id = 'no', type = 'sub', selected = not selected('sub') })
   local colw, pad, gap = 248 * s, 16 * s, 24 * s
-  local rows = 0
   local function row_h(t) return (t.off or track_meta(t) == '') and 36 * s or ROW_H * s end
   local heights = {}
   for ci, c in ipairs(cols) do
@@ -643,6 +679,7 @@ local function draw_menu(vw)
   fill(rect(px, py, pw, ph), '000000', 0x66, '\\blur12')
   fill(cut(px, py, pw, ph, 8 * s), T.surface1)
   stroke(cut(px, py, pw, ph, 8 * s), T.lineStrong, 1 * s)
+  kctx():trim(px, py, pw, ph, 8 * s)
   zone('menu', px, py, pw, ph)
   for ci, c in ipairs(cols) do
     local cx = px + pad + (ci - 1) * (colw + gap)
@@ -686,6 +723,7 @@ local function draw_panel()
   zone('panel', x0, 0, pw, st.h)
   -- head
   txt(x0 + 16 * s, 24 * s, 'PLAYLIST · ' .. hotkey_label('playlist'), { size = 11, weight = 600, color = T.muted, extra = '\\fsp1.5' })
+  kctx():motif(st.w - 92 * s - 48 * s, 20 * s, 48 * s, 8 * s, T.lineStrong)
   ibtn('pl-open', st.w - 84 * s, 4 * s, 'open')
   ibtn('pl-close', st.w - 44 * s, 4 * s, 'close')
   fill(rect(x0, TOP_H * s, pw, 1 * s), T.line)
@@ -771,7 +809,7 @@ local function skip_label(title)
 end
 
 local function draw_skip(vw, vis)
-  if st.idle or st.dur <= 0 or not st.chapter or st.chapter < 0 then return end
+  if not cfg.skip_button or st.idle or st.dur <= 0 or not st.chapter or st.chapter < 0 then return end
   local c = st.chapters[st.chapter + 1]
   local label = c and skip_label(c.title)
   if not label then return end
@@ -948,7 +986,7 @@ local function draw_idle(vw)
   if OPT.hasfile and mp.get_time() - SCRIPT_T0 < 2 and not st.demo_idle then return end
   if not intro.idle_t0 then intro.idle_t0 = mp.get_time(); animate(K.INTRO_LEN + 0.1) end
   local t = mp.get_time() - intro.idle_t0
-  local ctx = K.new({ out = out, s = s, T = T, ui = OPT.ui, mono = OPT.mono })
+  local ctx = K.new({ out = out, s = s, T = T, theme = TH, ui = OPT.ui, mono = OPT.mono })
 
   -- Everything here is laid out on a 1280×720 design canvas scaled to the window (u = px
   -- per design px), so a small window, a maximized one and fullscreen 4K look the same.
@@ -1132,7 +1170,7 @@ end
 local function cm_theme()
   local it = {}
   for i, t in ipairs(THEMES) do
-    it[#it + 1] = radio(t.name, i == theme_i, function() set_theme(i); save_settings(); osd('info', 'Theme', t.name) end)
+    it[#it + 1] = radio(t.name, i == theme_i, function() set_theme(i); save_settings(); osd('info', 'Theme', t.name) end, t.kanji)
     it[#it].keep = true
   end
   return it
@@ -1225,6 +1263,7 @@ local function cm_panel(items, x, y, w, level)
     end
     ry = ry + rh
   end
+  kctx():trim(x, y, w, h, 8 * s)
   return rows
 end
 
@@ -1500,21 +1539,39 @@ local function section_rows(name)
   local s = st.s
   local rows = {}
   if name == 'General' then
-    rows[#rows + 1] = { h = 120, draw = function(x, y, w, clip)
+    rows[#rows + 1] = { h = 142, draw = function(x, y, w, clip)
       txt(x, y + 22 * s, 'Theme', { size = 14, weight = 500, extra = clip })
       local tw = math.min(150 * s, (w - 3 * 12 * s) / 4)
+      local ch = 86 * s
       for i, th in ipairs(THEMES) do
         local c = K.colors(i)
         local tx, ty = x + (i - 1) * (tw + 12 * s), y + 40 * s
         local on = i == theme_i
-        fill(cut(tx, ty, tw, 64 * s, 6 * s), c.surface1, 0, clip)
-        fill(rect(tx + 10 * s, ty + 10 * s, tw * 0.42, 28 * s), c.accent, 0, clip)
-        fill(rect(tx + 14 * s + tw * 0.42, ty + 10 * s, tw * 0.2, 28 * s), c.signal, 0, clip)
-        txt(tx + 10 * s, ty + 51 * s, th.name, { size = 12, weight = on and 600 or 400, color = c.ink, extra = clip })
-        stroke(cut(tx, ty, tw, 64 * s, 6 * s), on and T.accentBright or (within(tx, ty, tw, 64 * s) and T.lineStrong or T.line), on and 2 * s or 1 * s, 0, clip)
-        zone('set-theme', tx, ty, tw, 64 * s, { i = i })
+        fill(cut(tx, ty, tw, ch, 6 * s), c.surface1, 0, clip)
+        -- a miniature of the theme's cover: the slab with its kanji, the bright block, the
+        -- signal, and its motif filling the rest
+        local bx, by, bh = tx + 10 * s, ty + 10 * s, 30 * s
+        local sw = r(tw * 0.3)
+        fill(rect(bx, by, sw, bh), c.accent, 0, clip)
+        txt(bx + sw / 2, by + bh / 2, th.kanji, { size = 15, weight = 600, an = 5, color = c.onAccent, extra = clip })
+        local b2, b3 = r(tw * 0.14), r(tw * 0.07)
+        fill(rect(bx + sw + 3 * s, by, b2, bh), c.accentBright, 0, clip)
+        fill(rect(bx + sw + b2 + 6 * s, by, b3, bh), c.signal, 0, clip)
+        local mx = bx + sw + b2 + b3 + 10 * s
+        local mw = tx + tw - 10 * s - mx
+        if mw >= 8 * s then fill(K.pattern(th.style.motif, mx, by, mw, bh, s, 10 * s), c.lineStrong, 0, clip) end
+        -- its seek bar and thumb
+        local ly, lw = ty + 52 * s, tw - 20 * s
+        fill(rect(bx, ly - 1.5 * s, lw, 3 * s), c.line, 0, clip)
+        fill(rect(bx, ly - 1.5 * s, lw * 0.62, 3 * s), c.accent, 0, clip)
+        local body, dot = K.thumb(th.style.thumb, bx + lw * 0.62, ly, 4.5 * s)
+        fill(body, c.accentBright, 0, clip)
+        if dot then fill(dot, c.onAccent, 0, clip) end
+        txt(bx, ty + 71 * s, th.name, { size = 12, weight = on and 600 or 400, color = c.ink, extra = clip })
+        stroke(cut(tx, ty, tw, ch, 6 * s), on and T.accentBright or (within(tx, ty, tw, ch) and T.lineStrong or T.line), on and 2 * s or 1 * s, 0, clip)
+        zone('set-theme', tx, ty, tw, ch, { i = i })
       end
-      fill(rect(x, y + 120 * s - 1 * s, w, 1 * s), T.line, 0, clip)
+      fill(rect(x, y + 142 * s - 1 * s, w, 1 * s), T.line, 0, clip)
     end }
     rows[#rows + 1] = row('Resume where you stopped', 'Reopening a file continues from the same moment, with the same tracks', onoff('resume'))
     rows[#rows + 1] = row('Build the playlist from the folder', 'Opening one episode lines up the rest of its series', onoff('autoplaylist'))
@@ -1626,6 +1683,7 @@ local function draw_settings()
   fill(rect(px, py + 10 * s, pw, ph), '000000', 0x60, '\\blur16')
   fill(cut(px, py, pw, ph, 10 * s), T.surface1)
   stroke(cut(px, py, pw, ph, 10 * s), T.lineStrong, 1 * s)
+  kctx():trim(px, py, pw, ph, 10 * s)
   zone('set-panel', px, py, pw, ph)
   -- header
   txt(px + 28 * s, py + 34 * s, 'Settings', { size = 20, weight = 600 })
@@ -1633,6 +1691,7 @@ local function draw_settings()
   if within(cx, cy, 36 * s, 36 * s) then fill(rect(cx, cy, 36 * s, 36 * s), T.surface2) end
   icon('close', cx + 8 * s, cy + 8 * s, 20 * s, T.muted)
   zone('set-close', cx, cy, 36 * s, 36 * s)
+  if pw >= 420 * s then kctx():motif(cx - 16 * s - 72 * s, py + 28 * s, 72 * s, 8 * s, T.lineStrong) end
   fill(rect(px, py + 64 * s, pw, 1 * s), T.line)
   -- nav
   local nx, nw = px + 12 * s, 176 * s
@@ -1715,7 +1774,7 @@ local was_visible = false
 local sub_pos_set = 100
 local function lift_subs(vis)
   local pos = 100
-  if vis and not st.idle then
+  if cfg.lift_subs and vis and not st.idle then
     local vid_h = st.h - (st.mt or 0) - (st.mb or 0)
     local overlap = BAR_H * st.s + 8 * st.s - (st.mb or 0)
     if vid_h > 0 and overlap > 0 then pos = math.max(50, math.floor(100 - overlap / vid_h * 100)) end
@@ -1752,11 +1811,15 @@ render = function()
   if st.settings then draw_settings() end
   if intro.frame_t0 and not st.idle then
     local t = now - intro.frame_t0
-    if t < 0.7 then K.new({ out = out, s = st.s, T = T }):intro_frame(t, st.w, st.h) else intro.frame_t0 = nil end
+    if t < 0.7 then kctx():intro_frame(t, st.w, st.h) else intro.frame_t0 = nil end
   end
-  ov.res_x, ov.res_y = st.w, st.h
-  ov.data = table.concat(out, '\n')
-  ov:update()
+  -- most renders (a time tick, a mouse move over the picture) draw exactly what is already up
+  local data = table.concat(out, '\n')
+  if data ~= ov.data or ov.res_x ~= st.w or ov.res_y ~= st.h then
+    ov.res_x, ov.res_y = st.w, st.h
+    ov.data = data
+    ov:update()
+  end
   thumb_sync()
 end
 
@@ -1824,8 +1887,8 @@ end
 
 local ACTIONS = {
   play = function() mp.commandv('cycle', 'pause') end,
-  back = function() mp.commandv('seek', -5) end,
-  fwd = function() mp.commandv('seek', 5) end,
+  back = function() mp.commandv('no-osd', 'seek', -cfg.seek_step) end,
+  fwd = function() mp.commandv('no-osd', 'seek', cfg.seek_step) end,
   mute = function() mp.commandv('cycle', 'mute') end,
   full = function() mp.commandv('cycle', 'fullscreen') end,
   info = function() st.info = not st.info end,
@@ -2215,7 +2278,11 @@ mp.register_script_message('doga-demo-idle', function(v)
 end)
 mp.register_event('seek', function() st.last_move = mp.get_time(); request_render() end)
 mp.register_event('end-file', function() remember() end)
-mp.register_event('shutdown', function() remember(); save_settings() end)
+-- The host waits for this goodbye before it lets the engine go, so the last save always lands.
+mp.register_event('shutdown', function()
+  remember(); save_settings()
+  mp.commandv('script-message-to', 'main', 'doga-bye')
+end)
 mp.add_periodic_timer(15, function() if not st.idle and not st.paused then remember() end end)
 
 ---------------------------------------------------------------------------

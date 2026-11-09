@@ -56,13 +56,13 @@ impl Payload {
             return None;
         }
         let (index_off, count, exe_len) = (u64le(&foot[0..]), u32le(&foot[8..]) as usize, u64le(&foot[12..]));
-        if index_off >= len || exe_len > index_off {
+        if index_off > len - FOOTER || exe_len > index_off {
             return None;
         }
         let mut index = vec![0u8; (len - FOOTER - index_off) as usize];
         f.seek(SeekFrom::Start(index_off)).ok()?;
         f.read_exact(&mut index).ok()?;
-        let mut entries = Vec::with_capacity(count);
+        let mut entries = Vec::with_capacity(count.min(4096));
         let mut p = 0usize;
         for _ in 0..count {
             let n = u32le(index.get(p..)?) as usize;
@@ -78,6 +78,10 @@ impl Payload {
 
     pub fn read(&self, e: &Entry) -> Option<Vec<u8>> {
         let mut f = File::open(&self.file).ok()?;
+        // a damaged index must not ask for more than the file holds
+        if e.offset.checked_add(e.packed)? > f.metadata().ok()?.len() {
+            return None;
+        }
         f.seek(SeekFrom::Start(e.offset)).ok()?;
         let mut buf = vec![0u8; e.packed as usize];
         f.read_exact(&mut buf).ok()?;

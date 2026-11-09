@@ -63,6 +63,7 @@ pub fn run_installer(pl: Payload) {
     if let Err(e) = unpacked {
         drop(splash);
         win::message_box("Dōga Setup", &format!("The installer could not unpack itself:\n{e}"));
+        let _ = std::fs::remove_dir_all(&tmp);
         return;
     }
     let dll = tmp.join("libmpv-2.dll");
@@ -71,6 +72,7 @@ pub fn run_installer(pl: Payload) {
         Ok(m) => m,
         Err(e) => {
             win::message_box("Dōga Setup", &format!("Could not start:\n{e}"));
+            let _ = std::fs::remove_dir_all(&tmp);
             return;
         }
     };
@@ -120,7 +122,11 @@ pub fn run_installer(pl: Payload) {
     let existing = dir.join("doga.exe").is_file();
     // `--update` (started by Dōga's updater): install on its own, keep the previous choices,
     // relaunch when done.
-    let auto = std::env::args().any(|a| a == "--update") && existing;
+    // Only ever unattended for a version newer than the one installed: anything else (the same
+    // version, or an older installer) shows the normal screen and waits for a click.
+    let installed = std::fs::read_to_string(dir.join(MARKER)).unwrap_or_default();
+    let newer = installed.trim().is_empty() || crate::update::is_newer(VERSION, installed.trim());
+    let auto = std::env::args_os().any(|a| a == "--update") && existing && newer;
     let had_desktop = sys::reg_get_str(UNINSTALL_KEY, "DesktopShortcut").map(|v| v == "1");
     let had_assoc = sys::reg_key_exists(&format!(r"Software\Classes\{PROGID}"));
     let yn = |b: bool| if b { "yes" } else { "no" };
@@ -128,8 +134,8 @@ pub fn run_installer(pl: Payload) {
         "script-opts",
         &format!(
             "doga-uidir={},doga-uifont={ui_font},doga-monofont={mono_font},setup-dir={},setup-version={VERSION},setup-existing={},setup-dryrun={},setup-auto={},setup-desktop={},setup-assoc={}",
-            fwd(&ui),
-            fwd(&dir),
+            crate::opt_quote(&fwd(&ui)),
+            crate::opt_quote(&fwd(&dir)),
             yn(existing),
             yn(dry_run()),
             yn(auto),
@@ -151,6 +157,7 @@ pub fn run_installer(pl: Payload) {
     drop(splash);
     let mut dev = crate::DevScript::from_env();
     sys::com_init();
+    let mut installing: Option<std::thread::JoinHandle<()>> = None;
 
     loop {
         let ev = mpv.wait(dev.timeout());
@@ -167,11 +174,12 @@ pub fn run_installer(pl: Payload) {
                         let _ = mpv.command(&["script-message-to", "installer", "setup-dir", &fwd(&d)]);
                     }
                 }
-                Some("setup-install") if args.len() >= 4 => {
+                // (one install at a time: a second click while one runs is ignored)
+                Some("setup-install") if args.len() >= 4 && installing.as_ref().map_or(true, |h| h.is_finished()) => {
                     let (m, p, t) = (mpv.clone(), pl.clone(), tmp.clone());
                     let dir = PathBuf::from(args[1].replace('/', "\\"));
                     let (desktop, assoc) = (args[2] == "1", args[3] == "1");
-                    std::thread::spawn(move || {
+                    installing = Some(std::thread::spawn(move || {
                         sys::com_init();
                         let r = install(&m, &p, &t, &dir, desktop, assoc);
                         let (state, msg) = match r {
@@ -179,7 +187,7 @@ pub fn run_installer(pl: Payload) {
                             Err(e) => ("error", e),
                         };
                         let _ = m.command(&["script-message-to", "installer", "setup-done", state, &msg]);
-                    });
+                    }));
                 }
                 Some("setup-launch") if args.len() >= 2 => {
                     let exe = PathBuf::from(args[1].replace('/', "\\")).join("doga.exe");
@@ -191,6 +199,11 @@ pub fn run_installer(pl: Payload) {
             },
             _ => {}
         }
+    }
+    // If the window was closed while files were still being copied, let that finish first:
+    // unloading the engine and deleting the unpacked files under it would leave half an install.
+    if let Some(h) = installing.take() {
+        let _ = h.join();
     }
     drop(mpv);
     sys::unload(&dll);
@@ -234,11 +247,12 @@ fn install(m: &Mpv, pl: &Payload, unpacked: &Path, dir: &Path, desktop: bool, as
     loop {
         match std::fs::write(&target_exe, &exe) {
             Ok(()) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && t0.elapsed().as_secs() < 15 => {
+            // a running exe refuses with "access denied" (5) or "in use by another process" (32)
+            Err(e) if matches!(e.raw_os_error(), Some(5 | 32)) && t0.elapsed().as_secs() < 15 => {
                 progress(m, 0.0, "Waiting for Dōga to close");
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Err("Dōga is running. Close it and try again.".into()),
+            Err(e) if matches!(e.raw_os_error(), Some(5 | 32)) => return Err("Dōga is running. Close it and try again.".into()),
             Err(e) => return Err(format!("Could not write doga.exe: {e}")),
         }
     }
@@ -359,8 +373,12 @@ pub fn run_uninstaller(args: &[String]) {
         }
     };
     // Only ever remove a folder the installer made, and that Windows lists as Dōga's.
+    let same = |a: &Path, b: &Path| {
+        let norm = |p: &Path| p.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase();
+        norm(a) == norm(b)
+    };
     let registered = sys::reg_get_str(UNINSTALL_KEY, "InstallLocation").map(PathBuf::from);
-    if !dir.join(MARKER).is_file() || registered.as_deref().is_some_and(|r| r != dir) {
+    if !dir.join(MARKER).is_file() || registered.as_deref().is_some_and(|r| !same(r, &dir)) {
         sys::info("Dōga", &format!("{} doesn't look like a Dōga installation, so nothing was removed.", dir.display()));
         return;
     }
@@ -368,6 +386,41 @@ pub fn run_uninstaller(args: &[String]) {
         return;
     }
     std::thread::sleep(std::time::Duration::from_millis(600));
+    // Nothing is touched while Dōga is still open (its files can't be deleted then).
+    let in_use = |f: &str| {
+        let p = dir.join(f);
+        p.is_file() && std::fs::OpenOptions::new().write(true).open(&p).is_err()
+    };
+    while in_use("doga.exe") || in_use("libmpv-2.dll") {
+        if !sys::ask("Uninstall Dōga", "Dōga is still open.\n\nClose it, then choose Yes to continue. No leaves everything as it is.") {
+            return;
+        }
+    }
+
+    // Files first: only what the installer put there. The marker goes last, and only when the
+    // rest is gone, so a run that was blocked can simply be started again.
+    let mut ok = true;
+    for _ in 0..20 {
+        ok = true;
+        for f in ["doga.exe", "libmpv-2.dll"] {
+            let p = dir.join(f);
+            if p.exists() && std::fs::remove_file(&p).is_err() {
+                ok = false;
+            }
+        }
+        let ui = dir.join("ui");
+        if ui.exists() && std::fs::remove_dir_all(&ui).is_err() {
+            ok = false;
+        }
+        if ok {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    if ok {
+        let _ = std::fs::remove_file(dir.join(MARKER));
+    }
+
     sys::com_init();
     if let Some(sm) = sys::start_menu_dir() {
         let _ = std::fs::remove_file(sm.join("Dōga.lnk"));
@@ -385,25 +438,7 @@ pub fn run_uninstaller(args: &[String]) {
     sys::reg_delete_tree(UNINSTALL_KEY);
     sys::assoc_changed();
 
-    // Remove only what we installed, then the folder if it's empty.
-    let mut ok = true;
-    for _ in 0..20 {
-        ok = true;
-        for f in ["doga.exe", "libmpv-2.dll", MARKER] {
-            let p = dir.join(f);
-            if p.exists() && std::fs::remove_file(&p).is_err() {
-                ok = false;
-            }
-        }
-        let ui = dir.join("ui");
-        if ui.exists() && std::fs::remove_dir_all(&ui).is_err() {
-            ok = false;
-        }
-        if ok {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
+    // the folder itself, if nothing else is in it
     let _ = std::fs::remove_dir(&dir);
     if ok {
         sys::info("Dōga", "Dōga was removed.");

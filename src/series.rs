@@ -58,6 +58,17 @@ struct Cand {
     label: String,
 }
 
+/// Kana, kanji and hangul. These are written without spaces, so a number right next to one
+/// ("タイトル01", "第01話") is still a number on its own, unlike the "264" in "x264".
+fn cjk(c: char) -> bool {
+    matches!(c as u32, 0x3000..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF66..=0xFF9F)
+}
+
+/// A letter or digit that glues onto its neighbours to make one word.
+fn glue(c: char) -> bool {
+    c.is_alphanumeric() && !cjk(c)
+}
+
 /// File name → readable title: no extension, no bracket groups, no release tags.
 pub fn clean(name: &str) -> String {
     let stem = match name.rfind('.') {
@@ -68,6 +79,11 @@ pub fn clean(name: &str) -> String {
     let mut s = String::with_capacity(stem.len());
     let mut depth: Vec<char> = Vec::new();
     for c in stem.chars() {
+        // fullwidth digits (０１) count as digits
+        let c = match c {
+            '０'..='９' => char::from(b'0' + (c as u32 - '０' as u32) as u8),
+            c => c,
+        };
         match c {
             '[' | '(' | '{' | '【' | '（' => depth.push(c),
             ']' | ')' | '}' | '】' | '）' if !depth.is_empty() => {
@@ -88,7 +104,7 @@ pub fn clean(name: &str) -> String {
             && i > 0
             && chars[i - 1].is_ascii_digit()
             && (1..=2).contains(&frac_len)
-            && !chars.get(i + 1 + frac_len).is_some_and(|n| n.is_alphanumeric());
+            && !chars.get(i + 1 + frac_len).is_some_and(|&n| glue(n));
         t.push(if c == '_' || (c == '.' && !decimal) { ' ' } else { c });
     }
     // stop at the first release tag
@@ -129,7 +145,8 @@ fn candidates(cleaned: &str) -> Vec<Cand> {
     let ch: Vec<(usize, char)> = cleaned.char_indices().collect();
     let n = ch.len();
     let at = |i: usize| ch.get(i).map(|x| x.1);
-    let alnum = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric());
+    let alnum = |c: Option<char>| c.is_some_and(glue);
+    let letter = |c: char| c.is_alphabetic() && !cjk(c);
     let digit = |c: Option<char>| c.is_some_and(|c| c.is_ascii_digit());
     let digits_from = |mut i: usize| -> (usize, u64) {
         let mut v = 0u64;
@@ -181,15 +198,15 @@ fn candidates(cleaned: &str) -> Vec<Cand> {
             continue;
         }
         // what's directly before: nothing, a separator, or an episode-ish word
-        let ok_before = if i == 0 || !ch[i - 1].1.is_alphanumeric() {
+        let ok_before = if i == 0 || !glue(ch[i - 1].1) {
             true
         } else {
             let mut k = i;
-            while k > 0 && ch[k - 1].1.is_alphabetic() {
+            while k > 0 && letter(ch[k - 1].1) {
                 k -= 1;
             }
             let word: String = ch[k..i].iter().map(|x| x.1.to_ascii_lowercase()).collect();
-            (k == 0 || !ch[k - 1].1.is_alphanumeric()) && NUM_PREFIXES.contains(&word.as_str())
+            (k == 0 || !glue(ch[k - 1].1)) && NUM_PREFIXES.contains(&word.as_str())
         };
         let (mut end, whole) = digits_from(i);
         let mut frac = 0u64;
@@ -203,7 +220,11 @@ fn candidates(cleaned: &str) -> Vec<Cand> {
         if ok_before && ok_after {
             // "EP04" → the series key ends before "EP"
             let mut s = i;
-            while s > 0 && ch[s - 1].1.is_alphabetic() {
+            while s > 0 && letter(ch[s - 1].1) {
+                s -= 1;
+            }
+            // "第01話" → the key ends before the ordinal mark
+            if s == i && s > 0 && matches!(ch[s - 1].1, '第' | '제') {
                 s -= 1;
             }
             let text: String = ch[i..end].iter().map(|x| x.1).collect();
@@ -282,6 +303,19 @@ pub fn detect_names(current: usize, names: &[String]) -> Option<Found> {
         })
         .collect();
     members.sort_by(|a, b| a.1.key.cmp(&b.1.key).then_with(|| natural_cmp(&names[a.0], &names[b.0])));
+    // Names that only *start* with a number ("12 Angry Men", "300", "2001 A Space Odyssey") share
+    // an empty title. Treat them as episodes only when the numbers look like a run: close
+    // together ("1" … "12", gaps allowed) or zero-padded to one width ("01", "02").
+    if key.is_empty() && cand.kind == Kind::Number {
+        let nums: Vec<u64> = members.iter().map(|(_, c)| if let Key::Num(_, v) = c.key { v / 1000 } else { 0 }).collect();
+        let (lo, hi) = (nums.iter().min().copied().unwrap_or(0), nums.iter().max().copied().unwrap_or(0));
+        let dense = hi - lo < 3 * nums.len() as u64 + 3;
+        let width = |c: &Cand| c.label.split('.').next().map_or(0, str::len);
+        let padded = members.iter().all(|(_, c)| width(c) == width(members[0].1)) && members.iter().any(|(_, c)| c.label.starts_with('0'));
+        if !dense && !padded {
+            return None;
+        }
+    }
     let name = trim_seps(&me.cleaned[..cand.start]).to_string();
     // "S01E04" labels collapse to "E04" only when every member is season 1
     let multi_season = members.iter().any(|(_, c)| matches!(c.key, Key::Num(s, _) if s > 1 && c.kind == Kind::SeasonEp));
@@ -463,6 +497,38 @@ mod tests {
         let names = ["Show EP02v2.mkv", "Show EP01.mkv", "Show EP03.mkv"];
         let (_, files, _) = run(names[0], &names).unwrap();
         assert_eq!(files, [names[1], names[0], names[2]]);
+    }
+
+    #[test]
+    fn japanese_numbering() {
+        // a number written straight after kana/kanji, with or without 第…話
+        for (a, b) in [
+            ("タイトル 第01話.mkv", "タイトル 第02話.mkv"),
+            ("タイトル 01話.mkv", "タイトル 02話.mkv"),
+            ("タイトル01.mkv", "タイトル02.mkv"),
+            ("タイトル第01話.mkv", "タイトル第02話.mkv"),
+            ("タイトル ０１.mkv", "タイトル ０２.mkv"),
+        ] {
+            let (name, files, labels) = run(a, &[a, b, "べつのさくひん 01.mkv"]).unwrap_or_else(|| panic!("{a}"));
+            assert_eq!(name, "タイトル", "{a}");
+            assert_eq!(files, vec![a, b], "{a}");
+            assert_eq!(labels, vec!["01", "02"], "{a}");
+        }
+        // still not fooled by codec numbers glued to latin letters
+        assert_eq!(run("Movie x264.mkv", &["Movie x264.mkv", "Movie x265.mkv"]), None);
+    }
+
+    #[test]
+    fn titles_that_start_with_a_number_are_not_a_series() {
+        let all = ["12 Angry Men.mkv", "300.mkv", "2001 A Space Odyssey.mkv"];
+        for f in all {
+            assert_eq!(run(f, &all), None, "{f}");
+        }
+        // but bare episode numbers are
+        let eps = ["1.mkv", "2.mkv", "3.mkv", "10.mkv"];
+        assert_eq!(run("2.mkv", &eps).map(|r| r.1.join("|")), Some("1.mkv|2.mkv|3.mkv|10.mkv".to_string()));
+        let pad = ["01 - Pilot.mkv", "02 - Second.mkv", "24 - Finale.mkv"];
+        assert_eq!(run("01 - Pilot.mkv", &pad).map(|r| r.2.join("|")), Some("01|02|24".to_string()));
     }
 
     #[test]

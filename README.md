@@ -45,7 +45,20 @@ Open with right-click › Settings… or **Ctrl+,**. The video keeps playing dim
 - **Hotkeys:** click a key, press the new one, Esc cancels. A key that's already taken moves over, and the old action shows "—". Reset all brings back the defaults.
 - **About:** version and engine versions; update status with Check now and Daily/Never; the settings folder; GitHub and licenses.
 
-Everything is saved in `%APPDATA%\Doga\settings.json`.
+Everything is saved in `%APPDATA%\Doga\settings.json`. Each save is written to a temporary file and swapped in, and the previous version is kept as `settings.json.bak`, so a crash or power cut mid-save can't leave you with empty settings.
+
+## Themes
+
+Four dark themes, switched with **Ctrl+T**, the right-click menu or Settings. A theme only changes the chrome: the picture and the black bars around it are identical in all four.
+
+| Theme | Colour | Details |
+| --- | --- | --- |
+| **Nightshade** 夜 | violet on black-purple | dot grid, round seek thumb, neon corner brackets on panels |
+| **Glacier** 氷 | ice cyan | cut-crystal facets, diamond seek thumb, double bevel on panels |
+| **Redline** 紅 | hot pink-red | slanted speed stripes, blade seek thumb, stripe tab on panels |
+| **Carbon** 炭 | pure-black OLED, white accent | twill weave, square seek thumb, registration ticks on panels |
+
+Each theme also has its own start-screen cover. The installer and updater open in the theme you use.
 
 ## Little things that just work
 
@@ -91,7 +104,7 @@ To switch the check off, go to Settings › About › Updates › Never. "Check 
 - **No file:** the start screen assembles itself in about 1.3 s, and a click skips it:
   - a scanline sweep,
   - HUD corner brackets drawing in, with labels typing beside them,
-  - the colour blocks sliding in and the seek-bar line filling,
+  - the theme's cover sliding in (each theme has its own) and the seek-bar line filling,
   - the name glitching in, with a divider drawing under it.
 
   It's laid out on a proportional canvas, so a small window, a maximized one and fullscreen 4K all look the same.

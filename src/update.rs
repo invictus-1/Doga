@@ -89,7 +89,8 @@ fn https_get(url: &str, accept: Option<&str>, mut progress: impl FnMut(u64, u64)
         let mut total = 0u32;
         let mut len = 4u32;
         WinHttpQueryHeaders(r.0, 5 | 0x2000_0000, std::ptr::null(), &mut total as *mut u32 as *mut c_void, &mut len, std::ptr::null_mut());
-        let mut out = Vec::with_capacity(total as usize);
+        // (the header is the server's claim: reserve at most 64 MB up front, grow if it's real)
+        let mut out = Vec::with_capacity((total as usize).min(64 << 20));
         loop {
             let mut n = 0u32;
             if WinHttpQueryDataAvailable(r.0, &mut n) == 0 {
@@ -181,8 +182,9 @@ pub fn spawn_daily_check(m: Arc<Mpv>, data: PathBuf) {
     if PUBLIC_KEY.is_empty() {
         return;
     }
-    let settings = std::fs::read_to_string(data.join("settings.json")).unwrap_or_default().replace(' ', "");
-    if settings.contains("\"updates\":false") {
+    // the installer that brought this version is done with: don't leave it in the temp folder
+    let _ = std::fs::remove_file(std::env::temp_dir().join(format!("Doga-Setup-{VERSION}.exe")));
+    if crate::read_settings(&data).contains("\"updates\":false") {
         return;
     }
     std::thread::spawn(move || {

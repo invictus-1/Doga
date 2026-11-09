@@ -59,7 +59,8 @@ impl DevScript {
 
 fn main() {
     win::dpi_aware();
-    let argv: Vec<String> = std::env::args().collect();
+    // (args_os: a stray unpaired surrogate in a file name must not panic the launch)
+    let argv: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
 
     // doga.exe --pack <out.exe>   (build step: this exe + libmpv + ui → one installer)
     if argv.get(1).map(String::as_str) == Some("--pack") {
@@ -138,6 +139,16 @@ fn run_player() {
         return;
     }
 
+    // Listen for further launches before the engine loads, so a second file opened while this
+    // one is still starting is handed over instead of timing out and opening a second window.
+    // (Test runs only get the drop handling.)
+    let (tx, rx) = std::sync::mpsc::channel();
+    if dev_run {
+        let _ = ipc::serve_drops_only(tx);
+    } else {
+        ipc::serve(tx);
+    }
+
     let mpv = match Mpv::load(&dll) {
         Ok(m) => m,
         Err(e) => {
@@ -160,17 +171,10 @@ fn run_player() {
     if !cfg!(debug_assertions) || std::env::var_os("DOGA_UPDATE_TEST").is_some() {
         update::spawn_daily_check(mpv.clone(), data.clone());
     }
-    if !dev_run {
-        let (tx, rx) = std::sync::mpsc::channel();
-        ipc::serve(tx);
+    {
         let m = mpv.clone();
-        std::thread::spawn(move || ipc_loop(m, rx));
-    } else {
-        // tests still get the drop handling
-        let (tx, rx) = std::sync::mpsc::channel();
-        let _ = ipc::serve_drops_only(tx);
-        let m = mpv.clone();
-        std::thread::spawn(move || ipc_loop(m, rx));
+        let had_args = !args.is_empty();
+        std::thread::spawn(move || ipc_loop(m, rx, had_args));
     }
 
     let mut dev = DevScript::from_env();
@@ -205,10 +209,41 @@ fn run_player() {
             _ => {}
         }
     }
+    // mpv is closing. The core keeps serving its clients until they have all left, so give the
+    // UI script a moment to finish writing settings and recents: it says "doga-bye" when done.
+    // (Returning straight away ended the process in the middle of those writes.)
+    let t0 = std::time::Instant::now();
+    while t0.elapsed().as_millis() < 2000 {
+        if let Ev::ClientMessage(args) = mpv.wait(0.05) {
+            if args.first().map(String::as_str) == Some("doga-bye") {
+                break;
+            }
+        }
+    }
+}
+
+/// settings.json as the UI script wrote it, spaces removed, for the simple `"key":value` checks
+/// the host does. Falls back to the previous copy if the file is missing or was cut short.
+pub fn read_settings(data: &Path) -> String {
+    for name in ["settings.json", "settings.json.bak"] {
+        let s = std::fs::read_to_string(data.join(name)).unwrap_or_default().replace(' ', "");
+        let t = s.trim();
+        if t.starts_with('{') && t.ends_with('}') {
+            return s;
+        }
+    }
+    String::new()
+}
+
+/// One value inside mpv's comma-separated `script-opts`, length-quoted (`%n%text`) so a path
+/// with a comma or quote in it arrives whole.
+pub fn opt_quote(v: &str) -> String {
+    format!("%{}%{}", v.len(), v)
 }
 
 /// Files from other launches, and drops on the player window.
-fn ipc_loop(m: Arc<Mpv>, rx: std::sync::mpsc::Receiver<ipc::Event>) {
+/// `had_args`: this launch opened files itself (the first of an Explorer multi-select).
+fn ipc_loop(m: Arc<Mpv>, rx: std::sync::mpsc::Receiver<ipc::Event>, had_args: bool) {
     // take over drops once the player window exists
     let t0 = std::time::Instant::now();
     let hwnd = loop {
@@ -222,7 +257,12 @@ fn ipc_loop(m: Arc<Mpv>, rx: std::sync::mpsc::Receiver<ipc::Event>) {
     };
     ipc::take_drops(hwnd);
 
-    let mut last_open = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    // Selecting several files and pressing Enter with Dōga closed starts one launch per file:
+    // this one has the first, the rest arrive here a moment later and must queue behind it.
+    let mut last_open = std::time::Instant::now();
+    if !had_args {
+        last_open -= std::time::Duration::from_secs(60);
+    }
     for ev in rx {
         match ev {
             ipc::Event::Open(files) => {
@@ -288,7 +328,7 @@ fn configure(m: &Mpv, ui: &Path, data: &Path) {
     m.opt("autofit-larger", "90%x90%");
     // Open the way it was last left: maximized, or windowed and fitted to the video.
     // (Fullscreen is never restored.) Applied before the window exists, so no jump.
-    let settings = std::fs::read_to_string(data.join("settings.json")).unwrap_or_default().replace(' ', "");
+    let settings = read_settings(data);
     if settings.contains("\"maximized\":true") {
         m.opt("window-maximized", "yes");
     }
@@ -308,12 +348,10 @@ fn configure(m: &Mpv, ui: &Path, data: &Path) {
     m.opt("screenshot-template", "%{filename/no-ext} %wH.%wM.%wS");
     m.opt("screenshot-tag-colorspace", "yes");
     // Settings that must be in place before the first file loads.
-    if settings.contains("\"resume\":false") {
+    let resume = !settings.contains("\"resume\":false");
+    let hwdec = !settings.contains("\"hwdec\":false");
+    if !resume {
         m.opt("resume-playback", "no");
-        m.opt("save-position-on-quit", "no");
-    }
-    if settings.contains("\"hwdec\":false") {
-        m.opt("hwdec", "no");
     }
     // Preferred languages (set from the right-click menu), applied before the first file loads.
     for (key, opt) in [("alang", "alang"), ("slang", "slang")] {
@@ -335,7 +373,7 @@ fn configure(m: &Mpv, ui: &Path, data: &Path) {
     // Picture: honour the file's tags, no enhancements. Scaling is the only pixel change.
     m.opt("vo", "gpu-next");
     m.opt("gpu-api", "d3d11");
-    m.opt("hwdec", "auto-safe");
+    m.opt("hwdec", if hwdec { "auto-safe" } else { "no" });
     m.opt("scale", "ewa_lanczossharp");
     m.opt("cscale", "ewa_lanczossharp");
     m.opt("dscale", "mitchell");
@@ -377,7 +415,7 @@ fn configure(m: &Mpv, ui: &Path, data: &Path) {
     m.opt("osd-level", "1");
 
     // Resume where you stopped, with the tracks you picked.
-    m.opt("save-position-on-quit", "yes");
+    m.opt("save-position-on-quit", if resume { "yes" } else { "no" });
     m.opt("watch-later-dir", &p(&data.join("watch_later")));
     m.opt("watch-later-options", "start,aid,sid,sub-delay");
 
@@ -395,8 +433,8 @@ fn configure(m: &Mpv, ui: &Path, data: &Path) {
         "script-opts",
         &format!(
             "doga-datadir={},doga-uidir={},doga-uifont={ui_font},doga-monofont={mono_font},doga-hasfile={},doga-version={}",
-            p(data),
-            p(ui),
+            opt_quote(&p(data)),
+            opt_quote(&p(ui)),
             if has_file { "yes" } else { "no" },
             update::VERSION
         ),
@@ -406,8 +444,7 @@ fn configure(m: &Mpv, ui: &Path, data: &Path) {
 /// When a single file is opened, fill the playlist with the rest of its series.
 fn on_file_loaded(m: &Mpv, data: &Path) {
     // Settings › General › "Build the playlist from the folder"
-    let settings = std::fs::read_to_string(data.join("settings.json")).unwrap_or_default().replace(' ', "");
-    if settings.contains("\"autoplaylist\":false") {
+    if read_settings(data).contains("\"autoplaylist\":false") {
         return;
     }
     let count: usize = m.get_prop("playlist-count").and_then(|s| s.parse().ok()).unwrap_or(0);

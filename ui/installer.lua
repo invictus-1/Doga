@@ -18,7 +18,25 @@ local OPT = {
 }
 package.path = OPT.uidir .. '/?.lua;' .. package.path
 local K = require 'kit'
-local T = K.colors(1)
+
+-- Setup wears the theme Dōga is already set to (Nightshade on a first install).
+local function read_theme()
+  local base = os.getenv('APPDATA')
+  if not base then return 1 end
+  for _, name in ipairs({ 'settings.json', 'settings.json.bak' }) do
+    local f = io.open(base .. '\\Doga\\' .. name, 'rb')
+    if f then
+      local t = utils.parse_json(f:read('*a'))
+      f:close()
+      if type(t) == 'table' and type(t.theme) == 'string' then return K.theme_index(t.theme) end
+    end
+  end
+  return 1
+end
+local theme_i = read_theme()
+local TH = K.THEMES[theme_i]
+local T = K.colors(theme_i)
+mp.set_property('background-color', '#' .. TH.c.surface0)
 
 local st = {
   w = 0, h = 0, s = 1, mx = -1, my = -1,
@@ -81,7 +99,7 @@ local function render()
   if st.w <= 0 then return end
   zones = {}
   local s, W, H = st.s, st.w, st.h
-  local ctx = K.new({ s = s, T = T, ui = OPT.ui, mono = OPT.mono, zones = zones })
+  local ctx = K.new({ s = s, T = T, theme = TH, ui = OPT.ui, mono = OPT.mono, zones = zones })
   local now = mp.get_time()
   local t = now - st.t0
   local ts = now - st.screen_t0
@@ -133,8 +151,8 @@ local function render()
     local gx = px + (fw + 120 * s) * g - 120 * s
     local gl, gr = math.max(px, gx), math.min(px + fw, gx + 120 * s)
     if gr > gl then ctx:fill(K.rect(gl, py, gr - gl, th), T.accentBright, 0x80) end
-    ctx:fill(K.circle(px + fw, py + th / 2, 8 * s), T.accentBright, a)
     ctx:fill(K.rect(px + fw - 1 * s, py - 10 * s, 2 * s, th + 20 * s), T.signal, a)
+    ctx:thumb(px + fw, py + th / 2, 8 * s, T.accentBright, a)
     ctx:txt(px, py + 36 * s, st.label, { size = 14, color = T.muted, alpha = a })
     ctx:txt(px + pw, py + 36 * s, string.format('%3d%%', math.floor(st.shown * 100 + 0.5)), { size = 15, mono = true, weight = 600, an = 6, color = T.accentBright, alpha = a })
 
@@ -243,6 +261,10 @@ mp.add_forced_key_binding('ENTER', 'setup-enter', function()
   elseif st.screen == 'error' then start_install() end
 end)
 mp.add_forced_key_binding('ESC', 'setup-esc', function()
+  if st.screen ~= 'installing' then mp.commandv('quit') end
+end)
+-- the window's close button: the same, so files are never left half-copied
+mp.add_forced_key_binding('CLOSE_WIN', 'setup-close', function()
   if st.screen ~= 'installing' then mp.commandv('quit') end
 end)
 
