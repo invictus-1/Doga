@@ -1,0 +1,29 @@
+name: CI
+
+# Builds Dōga and runs its tests on every push and pull request.
+# The installer is not built here: releases are signed on the maintainer's PC.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustc --version && cargo --version
+      - name: Build
+        run: cargo build --locked
+      - name: Test
+        run: cargo test --locked

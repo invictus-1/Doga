@@ -131,6 +131,8 @@ At runtime Dōga needs `libmpv-2.dll`. Put it next to `doga.exe`, or in `vendor/
 cargo run -- "D:\Anime\Show - 01.mkv"
 ```
 
+Every push and pull request is built and tested by GitHub Actions (`.github/workflows/ci.yml`: `cargo build`, then `cargo test`, on Windows).
+
 Settings, resume positions, recent files and the tracks picked per series (`series.json`) are stored in `%APPDATA%\Doga`, or in `data\` beside `doga.exe` when a `portable.txt` sits there. The window opens the way you last left it: maximized, or windowed and fitted to the video. Fullscreen is always manual.
 
 ## Series detection
