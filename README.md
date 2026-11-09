@@ -27,8 +27,22 @@ A video player for Windows that plays the file exactly as it was made: no colour
 | O | open files |
 | Z / X | subtitle delay −/+ 50 ms |
 | Ctrl+T | next theme (Nightshade, Glacier, Redline, Carbon) |
+| Ctrl+, | Settings |
 | Esc | close menu / leave fullscreen |
 | Media keys | play/pause, next/previous, stop (keyboards, headphones, the Windows media overlay) |
+
+## Settings
+
+Open with right-click › Settings… or **Ctrl+,**. The video keeps playing dimmed behind it.
+
+- **General:** theme; resume where you stopped; build the playlist from the folder; the Skip opening/ending button.
+- **Playback:** seek step for ← → (3–30 s); hardware decoding (the picture is identical either way); your preferred audio and subtitle languages, with Clear.
+- **Subtitles:** size (80–130%); whether dialogue moves above the controls.
+- **Audio:** volume on launch (remember or always 100%); output device.
+- **Hotkeys:** click a key, press the new one, Esc cancels. A key that's already taken moves over, and the old action shows "—". Reset all brings back the defaults.
+- **About:** version and engine versions; update status with Check now and Daily/Never; the settings folder; GitHub and licenses.
+
+Everything is saved in `%APPDATA%\Doga\settings.json`.
 
 ## Little things that just work
 
@@ -59,7 +73,7 @@ A few seconds after launch, at most once a day, Dōga asks GitHub whether there'
 2. checks the signature against the key built into Dōga, and refuses anything that doesn't match,
 3. updates in place, keeping your settings and choices, and reopens Dōga.
 
-To switch the check off, add `"updates":false` to `%APPDATA%\Doga\settings.json`.
+To switch the check off, go to Settings › About › Updates › Never. "Check now" still works whenever you click it.
 
 ### Releasing (maintainers)
 

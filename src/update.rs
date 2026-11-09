@@ -207,6 +207,28 @@ pub fn spawn_daily_check(m: Arc<Mpv>, data: PathBuf) {
     });
 }
 
+/// Settings › About › "Check now": always asks, always answers (available / current / error).
+pub fn spawn_check_now(m: Arc<Mpv>, data: PathBuf) {
+    std::thread::spawn(move || {
+        let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+        let body = match https_get(&url, Some("application/vnd.github+json"), |_, _| {}) {
+            Ok(b) => b,
+            Err(e) => return notify(&m, &["error", &format!("couldn't reach GitHub ({e})")]),
+        };
+        match parse_release(&String::from_utf8_lossy(&body)) {
+            Some(rel) => {
+                let _ = std::fs::write(state_file(&data), format!("{{\"checked\":{},\"latest\":\"{}\"}}", now(), rel.version));
+                if is_newer(&rel.version, &current()) {
+                    notify(&m, &["available", &rel.version]);
+                } else {
+                    notify(&m, &["current", &current()]);
+                }
+            }
+            None => notify(&m, &["current", &current()]),
+        }
+    });
+}
+
 /// User clicked "Update": download, verify, hand over to the installer, quit.
 pub fn spawn_install(m: Arc<Mpv>) {
     std::thread::spawn(move || {

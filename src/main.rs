@@ -179,10 +179,16 @@ fn run_player() {
         dev.run(&mpv);
         match ev {
             Ev::Shutdown => break,
-            Ev::FileLoaded => on_file_loaded(&mpv),
+            Ev::FileLoaded => on_file_loaded(&mpv, &data),
             Ev::ClientMessage(args) => match args.first().map(String::as_str) {
                 Some("doga-open") => open_dialog(&mpv),
                 Some("doga-update-install") => update::spawn_install(mpv.clone()),
+                Some("doga-update-check") => update::spawn_check_now(mpv.clone(), data.clone()),
+                Some("doga-open-data") => sys::shell_open(&data.to_string_lossy()),
+                // only Dōga's own pages, never an arbitrary URL from a message
+                Some("doga-open-url") if args.get(1).is_some_and(|u| u.starts_with("https://github.com/invictus-1/Doga")) => {
+                    sys::shell_open(&args[1])
+                }
                 Some("doga-thumb") => {
                     if let Some(r) = thumbs::Req::parse(&args) {
                         let _ = thumbs.send(r);
@@ -280,6 +286,14 @@ fn configure(m: &Mpv, ui: &Path, data: &Path) {
     if settings.contains("\"maximized\":true") {
         m.opt("window-maximized", "yes");
     }
+    // Settings that must be in place before the first file loads.
+    if settings.contains("\"resume\":false") {
+        m.opt("resume-playback", "no");
+        m.opt("save-position-on-quit", "no");
+    }
+    if settings.contains("\"hwdec\":false") {
+        m.opt("hwdec", "no");
+    }
     // Preferred languages (set from the right-click menu), applied before the first file loads.
     for (key, opt) in [("alang", "alang"), ("slang", "slang")] {
         if let Some(v) = json_str_field(&settings, key).filter(|v| v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ',')) {
@@ -359,16 +373,22 @@ fn configure(m: &Mpv, ui: &Path, data: &Path) {
     m.opt(
         "script-opts",
         &format!(
-            "doga-datadir={},doga-uidir={},doga-uifont={ui_font},doga-monofont={mono_font},doga-hasfile={}",
+            "doga-datadir={},doga-uidir={},doga-uifont={ui_font},doga-monofont={mono_font},doga-hasfile={},doga-version={}",
             p(data),
             p(ui),
-            if has_file { "yes" } else { "no" }
+            if has_file { "yes" } else { "no" },
+            update::VERSION
         ),
     );
 }
 
 /// When a single file is opened, fill the playlist with the rest of its series.
-fn on_file_loaded(m: &Mpv) {
+fn on_file_loaded(m: &Mpv, data: &Path) {
+    // Settings › General › "Build the playlist from the folder"
+    let settings = std::fs::read_to_string(data.join("settings.json")).unwrap_or_default().replace(' ', "");
+    if settings.contains("\"autoplaylist\":false") {
+        return;
+    }
     let count: usize = m.get_prop("playlist-count").and_then(|s| s.parse().ok()).unwrap_or(0);
     let Some(path) = m.get_prop("path") else { return };
     let file = Path::new(&path);

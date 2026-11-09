@@ -11,6 +11,7 @@ local OPT = {
   ui = mp.get_opt('doga-uifont') or 'Segoe UI',
   mono = mp.get_opt('doga-monofont') or 'Consolas',
   hasfile = mp.get_opt('doga-hasfile') == 'yes',
+  version = mp.get_opt('doga-version') or '',
 }
 package.path = OPT.uidir .. '/?.lua;' .. package.path
 local K = require 'kit'
@@ -76,9 +77,29 @@ local function write_json(p, t)
   local f = io.open(p .. '.tmp', 'wb'); if not f then return end
   f:write(s); f:close(); os.remove(p); os.rename(p .. '.tmp', p)
 end
+-- Everything the Settings page edits. Defaults are what Dōga does out of the box.
+local cfg = {
+  seek_step = 5,          -- seconds for ← →
+  hwdec = true,           -- hardware decoding (picture is identical either way)
+  sub_scale = 1.0,        -- subtitle size
+  lift_subs = true,       -- move subtitles above the controls while they show
+  resume = true,          -- resume where you stopped
+  autoplaylist = true,    -- build the playlist from the opened file's folder
+  skip_button = true,     -- "Skip opening/ending" button
+  updates = true,         -- quiet daily update check
+  volume_mode = 'remember', -- 'remember' | 'reset' (always 100%)
+  audio_device = 'auto',
+  keys = {},              -- hotkey overrides: action id → key ('' = unassigned)
+}
+
 local function save_settings()
-  write_json(settings_path, { theme = THEMES[theme_i].id, panel = st.panel, volume = st.volume, maximized = st.maximized and true or false,
-    alang = st.alang or '', slang = st.slang or '' })
+  write_json(settings_path, {
+    theme = THEMES[theme_i].id, panel = st.panel, volume = st.volume, maximized = st.maximized and true or false,
+    alang = st.alang or '', slang = st.slang or '',
+    seek_step = cfg.seek_step, hwdec = cfg.hwdec, sub_scale = cfg.sub_scale, lift_subs = cfg.lift_subs,
+    resume = cfg.resume, autoplaylist = cfg.autoplaylist, skip_button = cfg.skip_button, updates = cfg.updates,
+    volume_mode = cfg.volume_mode, audio_device = cfg.audio_device, keys = cfg.keys,
+  })
 end
 
 ---------------------------------------------------------------------------
@@ -278,6 +299,7 @@ end
 -- OSD message
 ---------------------------------------------------------------------------
 local render -- forward
+local open_settings -- forward (Settings page, defined further down)
 local function osd(icon_name, lead, value, meta, opts)
   st.osd = { icon = icon_name, lead = lead, value = value, meta = meta, bar = opts and opts.bar, off = opts and opts.off }
   st.osd_until = mp.get_time() + 1.2
@@ -1063,6 +1085,8 @@ local function cm_main()
     { label = 'Playlist', key = 'P', check = st.panel, fn = function() st.panel = not st.panel; apply_margin(); save_settings() end },
     { label = 'Info', key = 'I', check = st.info, disabled = nofile, fn = function() st.info = not st.info end },
     { label = 'Fullscreen', key = 'F', check = st.fs, fn = function() mp.commandv('cycle', 'fullscreen') end },
+    { sep = true },
+    { label = 'Settings…', key = 'Ctrl+,', fn = function() open_settings() end },
   }
   for i = #top, 1, -1 do table.insert(items, 1, top[i]) end
   return items
@@ -1169,6 +1193,399 @@ local function cm_activate(z)
 end
 
 ---------------------------------------------------------------------------
+-- Settings: applying them, hotkeys, and the Settings page
+---------------------------------------------------------------------------
+local function apply_cfg()
+  mp.set_property('hwdec', cfg.hwdec and 'auto-safe' or 'no')
+  mp.set_property_number('sub-scale', cfg.sub_scale)
+  mp.set_property('save-position-on-quit', cfg.resume and 'yes' or 'no')
+  mp.set_property('resume-playback', cfg.resume and 'yes' or 'no')
+  if cfg.audio_device and cfg.audio_device ~= '' then mp.set_property('audio-device', cfg.audio_device) end
+end
+
+-- Every remappable action, with its default key (from ui/input.conf) and what it runs.
+local HOTKEYS = {
+  { id = 'pause', label = 'Play / pause', key = 'SPACE', cmd = 'no-osd cycle pause' },
+  { id = 'audio', label = 'Next audio track', key = 'b', cmd = 'script-binding doga/cycle-audio' },
+  { id = 'audio-back', label = 'Previous audio track', key = 'B', cmd = 'script-binding doga/cycle-audio-back' },
+  { id = 'sub', label = 'Next subtitle track', key = 'v', cmd = 'script-binding doga/cycle-sub' },
+  { id = 'sub-back', label = 'Previous subtitle track', key = 'V', cmd = 'script-binding doga/cycle-sub-back' },
+  { id = 'seek-back', label = 'Seek back', key = 'LEFT', cmd = 'script-binding doga/seek-back' },
+  { id = 'seek-fwd', label = 'Seek forward', key = 'RIGHT', cmd = 'script-binding doga/seek-fwd' },
+  { id = 'vol-up', label = 'Volume up', key = 'UP', cmd = 'script-binding doga/vol-up' },
+  { id = 'vol-down', label = 'Volume down', key = 'DOWN', cmd = 'script-binding doga/vol-down' },
+  { id = 'mute', label = 'Mute', key = 'm', cmd = 'script-binding doga/mute' },
+  { id = 'full', label = 'Fullscreen', key = 'f', cmd = 'no-osd cycle fullscreen' },
+  { id = 'playlist', label = 'Playlist', key = 'p', cmd = 'script-binding doga/toggle-playlist' },
+  { id = 'next', label = 'Next in playlist', key = 'ENTER', cmd = 'no-osd playlist-next' },
+  { id = 'prev', label = 'Previous in playlist', key = 'Shift+ENTER', cmd = 'no-osd playlist-prev' },
+  { id = 'info', label = 'Info', key = 'i', cmd = 'script-binding doga/toggle-info' },
+  { id = 'open', label = 'Open file', key = 'o', cmd = 'script-binding doga/open' },
+  { id = 'sub-minus', label = 'Subtitles earlier', key = 'z', cmd = 'script-binding doga/sub-delay-minus' },
+  { id = 'sub-plus', label = 'Subtitles later', key = 'x', cmd = 'script-binding doga/sub-delay-plus' },
+  { id = 'frame-back', label = 'Previous frame', key = ',', cmd = 'no-osd frame-back-step' },
+  { id = 'frame-fwd', label = 'Next frame', key = '.', cmd = 'no-osd frame-step' },
+  { id = 'theme', label = 'Next theme', key = 'Ctrl+t', cmd = 'script-binding doga/cycle-theme' },
+  { id = 'settings', label = 'Settings', key = 'Ctrl+,', cmd = 'script-binding doga/settings' },
+  { id = 'quit', label = 'Quit', key = 'q', cmd = 'quit' },
+}
+
+local function key_of(h) local k = cfg.keys[h.id]; if k == nil then return h.key end; return k end
+
+local KEY_NAMES = { SPACE = 'Space', ENTER = 'Enter', LEFT = '←', RIGHT = '→', UP = '↑', DOWN = '↓', ESC = 'Esc', BS = 'Backspace',
+  DEL = 'Delete', INS = 'Insert', PGUP = 'Page Up', PGDWN = 'Page Down', HOME = 'Home', END = 'End', TAB = 'Tab' }
+local function key_label(k)
+  if not k or k == '' then return '—' end
+  local mods, base = k:match('^(.-%+)([^+]+)$')
+  if not mods then mods, base = '', k end
+  if base:match('^%u$') then mods = mods .. 'Shift+' end
+  base = KEY_NAMES[base] or (#base == 1 and base:upper()) or base
+  return mods .. base
+end
+
+-- Hotkey overrides are forced bindings layered over ui/input.conf.
+local applied_keys = {}
+local function apply_keys()
+  for _, n in ipairs(applied_keys) do mp.remove_key_binding(n) end
+  applied_keys = {}
+  local taken = {}
+  for _, h in ipairs(HOTKEYS) do local k = key_of(h); if k ~= '' then taken[k] = true end end
+  for _, h in ipairs(HOTKEYS) do
+    local k = cfg.keys[h.id]
+    if k ~= nil and k ~= h.key then
+      if not taken[h.key] then -- the old default key now does nothing
+        local n = 'kb-off-' .. h.id
+        mp.add_forced_key_binding(h.key, n, function() end)
+        applied_keys[#applied_keys + 1] = n
+      end
+      if k ~= '' then
+        local n = 'kb-' .. h.id
+        mp.add_forced_key_binding(k, n, function() mp.command(h.cmd) end, { repeatable = true })
+        applied_keys[#applied_keys + 1] = n
+      end
+    end
+  end
+end
+
+-- Key capture: while waiting, every ordinary key (with modifiers) is caught once.
+local CAPTURE = {}
+do
+  local base = {}
+  for c in ('abcdefghijklmnopqrstuvwxyz0123456789'):gmatch('.') do base[#base + 1] = c end
+  for _, c in ipairs({ ',', '.', '/', ';', "'", '[', ']', '-', '=', '`' }) do base[#base + 1] = c end
+  for i = 1, 12 do base[#base + 1] = 'F' .. i end
+  for _, c in ipairs({ 'SPACE', 'ENTER', 'TAB', 'BS', 'DEL', 'INS', 'HOME', 'END', 'PGUP', 'PGDWN', 'LEFT', 'RIGHT', 'UP', 'DOWN', 'ESC' }) do base[#base + 1] = c end
+  for _, b in ipairs(base) do
+    CAPTURE[#CAPTURE + 1] = b
+    for _, m in ipairs({ 'Ctrl+', 'Alt+', 'Ctrl+Shift+' }) do CAPTURE[#CAPTURE + 1] = m .. b end
+    if b:match('^%l$') then CAPTURE[#CAPTURE + 1] = b:upper() -- Shift+letter
+    elseif #b > 1 and b ~= 'ESC' then CAPTURE[#CAPTURE + 1] = 'Shift+' .. b end
+  end
+end
+local capture_names = {}
+local function stop_capture()
+  for _, n in ipairs(capture_names) do mp.remove_key_binding(n) end
+  capture_names = {}
+  st.capture = nil
+end
+local function captured(k)
+  local id = st.capture
+  stop_capture()
+  if k == 'ESC' or not id then render(); return end
+  local moved
+  for _, h in ipairs(HOTKEYS) do
+    if h.id ~= id and key_of(h) == k then cfg.keys[h.id] = ''; moved = h.label end
+  end
+  for _, h in ipairs(HOTKEYS) do
+    if h.id == id then cfg.keys[id] = (k == h.key) and nil or k end
+  end
+  apply_keys()
+  save_settings()
+  osd('info', 'Hotkey', key_label(k), moved and ('taken from “' .. moved .. '”') or nil)
+end
+local function start_capture(id)
+  stop_capture()
+  st.capture = id
+  for i, k in ipairs(CAPTURE) do
+    local n = 'cap-' .. i
+    mp.add_forced_key_binding(k, n, function() captured(k) end)
+    capture_names[#capture_names + 1] = n
+  end
+  render()
+end
+
+-- The page ------------------------------------------------------------------
+local SECTIONS = { 'General', 'Playback', 'Subtitles', 'Audio', 'Hotkeys', 'About' }
+local ENGINE = {}
+
+open_settings = function(section)
+  st.cm, st.menu = nil, nil
+  st.settings = { section = section or (st.settings and st.settings.section) or 'General', scroll = 0 }
+  ENGINE.mpv = ENGINE.mpv or (mp.get_property('mpv-version') or ''):gsub('^mpv ', '')
+  ENGINE.ffmpeg = ENGINE.ffmpeg or mp.get_property('ffmpeg-version') or ''
+  render()
+end
+local function close_settings() stop_capture(); st.settings = nil; render() end
+
+-- control helpers (all drawn inside the content clip)
+local function seg(ctx_clip, id, x, y, opts, current, data)
+  -- right-aligned row of chips; returns nothing
+  local s = st.s
+  local h = 32 * s
+  local widths, total = {}, 0
+  for i, o in ipairs(opts) do widths[i] = text_w(o[1], 13 * s) + 28 * s; total = total + widths[i] + 6 * s end
+  local cx = x - total + 6 * s
+  for i, o in ipairs(opts) do
+    local on = o[2] == current
+    local hov = within(cx, y, widths[i], h)
+    fill(cut(cx, y, widths[i], h, 4 * s), on and T.accent or (hov and T.line or T.surface2), 0, ctx_clip)
+    txt(cx + widths[i] / 2, y + h / 2, o[1], { size = 13, weight = on and 600 or 500, an = 5, color = on and T.onAccent or T.ink, extra = ctx_clip })
+    zone('set-seg', cx, y, widths[i], h, { id = id, value = o[2], extra = data })
+    cx = cx + widths[i] + 6 * s
+  end
+end
+local function sbutton(clip, id, x, y, label, data, primary)
+  local s = st.s
+  local w, h = text_w(label, 13 * s) + 32 * s, 32 * s
+  x = x - w
+  local hov = within(x, y, w, h)
+  if primary then
+    fill(cut(x, y, w, h, 4 * s), hov and T.accentStrong or T.accent, 0, clip)
+    txt(x + w / 2, y + h / 2, label, { size = 13, weight = 600, an = 5, color = T.onAccent, extra = clip })
+  else
+    fill(cut(x, y, w, h, 4 * s), hov and T.line or T.surface2, 0, clip)
+    stroke(cut(x, y, w, h, 4 * s), T.lineStrong, 1 * s, 0, clip)
+    txt(x + w / 2, y + h / 2, label, { size = 13, weight = 500, an = 5, extra = clip })
+  end
+  zone(id, x, y, w, h, data)
+  return w
+end
+
+local ONOFF = { { 'On', true }, { 'Off', false } }
+
+-- Each section returns rows: { h = height, draw = function(x, y, w, clip) }
+-- ctrl_w: how much room (css px) the control on the right needs; the description gets the rest
+local function row(label, desc, control, h, ctrl_w)
+  return { h = (h or 64) , draw = function(x, y, w, clip)
+    local s = st.s
+    txt(x, y + (desc and 22 or 32) * s, label, { size = 14, weight = 500, extra = clip })
+    local dw = control and (w - (ctrl_w or 200) * s - 24 * s) or w
+    if desc then txt(x, y + 44 * s, fit(desc, dw, 12 * s), { size = 12, color = T.muted, extra = clip }) end
+    if control then control(x + w, y + 16 * s, clip) end
+    fill(rect(x, y + (h or 64) * s - 1 * s, w, 1 * s), T.line, 0, clip)
+  end }
+end
+local function onoff(key)
+  return function(rx, y, clip) seg(clip, key, rx, y, ONOFF, cfg[key]) end
+end
+
+local function lang_line(kind)
+  local pref = st[kind == 'audio' and 'alang' or 'slang']
+  return row(kind == 'audio' and 'Preferred audio language' or 'Preferred subtitle language',
+    pref and ('Every file opens with ' .. lang_name(pref) .. ' when it has it') or 'Each file\'s default · set it from right-click › ' .. (kind == 'audio' and 'Audio' or 'Subtitles'),
+    function(rx, y, clip)
+      if pref then sbutton(clip, 'set-clear-lang', rx, y, 'Clear ' .. lang_name(pref), { kind = kind }) end
+    end)
+end
+
+local function section_rows(name)
+  local s = st.s
+  local rows = {}
+  if name == 'General' then
+    rows[#rows + 1] = { h = 120, draw = function(x, y, w, clip)
+      txt(x, y + 22 * s, 'Theme', { size = 14, weight = 500, extra = clip })
+      local tw = math.min(150 * s, (w - 3 * 12 * s) / 4)
+      for i, th in ipairs(THEMES) do
+        local c = K.colors(i)
+        local tx, ty = x + (i - 1) * (tw + 12 * s), y + 40 * s
+        local on = i == theme_i
+        fill(cut(tx, ty, tw, 64 * s, 6 * s), c.surface1, 0, clip)
+        fill(rect(tx + 10 * s, ty + 10 * s, tw * 0.42, 28 * s), c.accent, 0, clip)
+        fill(rect(tx + 14 * s + tw * 0.42, ty + 10 * s, tw * 0.2, 28 * s), c.signal, 0, clip)
+        txt(tx + 10 * s, ty + 51 * s, th.name, { size = 12, weight = on and 600 or 400, color = c.ink, extra = clip })
+        stroke(cut(tx, ty, tw, 64 * s, 6 * s), on and T.accentBright or (within(tx, ty, tw, 64 * s) and T.lineStrong or T.line), on and 2 * s or 1 * s, 0, clip)
+        zone('set-theme', tx, ty, tw, 64 * s, { i = i })
+      end
+      fill(rect(x, y + 120 * s - 1 * s, w, 1 * s), T.line, 0, clip)
+    end }
+    rows[#rows + 1] = row('Resume where you stopped', 'Reopening a file continues from the same moment, with the same tracks', onoff('resume'))
+    rows[#rows + 1] = row('Build the playlist from the folder', 'Opening one episode lines up the rest of its series', onoff('autoplaylist'))
+    rows[#rows + 1] = row('“Skip opening / ending” button', 'Shown while a chapter is an opening or ending', onoff('skip_button'))
+    rows[#rows + 1] = row('Window', 'Opens the way you left it: maximized, or fitted to the video. Fullscreen is always manual.', nil)
+  elseif name == 'Playback' then
+    rows[#rows + 1] = row('Seek step', 'How far ← and → jump', function(rx, y, clip)
+      seg(clip, 'seek_step', rx, y, { { '3s', 3 }, { '5s', 5 }, { '10s', 10 }, { '15s', 15 }, { '30s', 30 } }, cfg.seek_step)
+    end)
+    rows[#rows + 1] = row('Hardware decoding', 'Lighter on the CPU; the picture is identical either way', onoff('hwdec'))
+    rows[#rows + 1] = lang_line('audio')
+    rows[#rows + 1] = lang_line('sub')
+  elseif name == 'Subtitles' then
+    rows[#rows + 1] = row('Size', 'Scales plain and styled subtitles alike', function(rx, y, clip)
+      seg(clip, 'sub_scale', rx, y, { { '80%', 0.8 }, { '90%', 0.9 }, { '100%', 1.0 }, { '115%', 1.15 }, { '130%', 1.3 } }, cfg.sub_scale)
+    end)
+    rows[#rows + 1] = row('Move above the controls', 'Dialogue steps up while the bar is showing; signs never move', onoff('lift_subs'))
+  elseif name == 'Audio' then
+    rows[#rows + 1] = row('Volume on launch', 'Remember your last volume, or always start at 100%', function(rx, y, clip)
+      seg(clip, 'volume_mode', rx, y, { { 'Remember', 'remember' }, { 'Always 100%', 'reset' } }, cfg.volume_mode)
+    end)
+    rows[#rows + 1] = { h = 40, draw = function(x, y, w, clip)
+      txt(x, y + 26 * s, 'OUTPUT DEVICE', { size = 10, weight = 600, color = T.muted, extra = '\\fsp1.5' .. clip })
+    end }
+    local cur = mp.get_property('audio-device') or 'auto'
+    local devices = {}
+    for _, d in ipairs(mp.get_property_native('audio-device-list') or {}) do
+      -- the normal Windows devices only (skip duplicates mpv lists from other backends)
+      if d.name == 'auto' or d.name:match('^wasapi/') then devices[#devices + 1] = d end
+    end
+    for _, d in ipairs(devices) do
+      rows[#rows + 1] = { h = 40, draw = function(x, y, w, clip)
+        local on = d.name == cur
+        if on or within(x, y, w, 40 * s) then fill(rect(x - 8 * s, y, w + 16 * s, 40 * s), T.surface2, 0, clip) end
+        if on then fill(diamond(x + 8 * s, y + 20 * s, 5 * s), T.accent, 0, clip) end
+        txt(x + 26 * s, y + 20 * s, fit(d.name == 'auto' and 'System default' or (d.description or d.name), w - 40 * s, 14 * s),
+          { size = 14, color = on and T.accentBright or T.ink, extra = clip })
+        zone('set-device', x - 8 * s, y, w + 16 * s, 40 * s, { name = d.name })
+      end }
+    end
+  elseif name == 'Hotkeys' then
+    rows[#rows + 1] = { h = 52, draw = function(x, y, w, clip)
+      txt(x, y + 18 * s, 'Click a key, then press the new one. Esc cancels.', { size = 12, color = T.muted, extra = clip })
+      sbutton(clip, 'set-keys-reset', x + w, y + 2 * s, 'Reset all')
+    end }
+    for _, h in ipairs(HOTKEYS) do
+      rows[#rows + 1] = { h = 44, draw = function(x, y, w, clip)
+        local waiting = st.capture == h.id
+        local k = key_of(h)
+        local custom = cfg.keys[h.id] ~= nil
+        if within(x, y, w, 44 * s) or waiting then fill(rect(x - 8 * s, y, w + 16 * s, 44 * s), T.surface2, 0, clip) end
+        txt(x, y + 22 * s, h.label, { size = 14, extra = clip })
+        local label = waiting and 'Press a key…' or key_label(k)
+        local kw = text_w(label, 13 * s) + 24 * s
+        local kx = x + w - kw
+        fill(cut(kx, y + 7 * s, kw, 30 * s, 4 * s), waiting and T.accent or T.surface1, 0, clip)
+        stroke(cut(kx, y + 7 * s, kw, 30 * s, 4 * s), waiting and T.accent or (custom and T.accent or T.lineStrong), 1 * s, 0, clip)
+        txt(kx + kw / 2, y + 22 * s, label, { size = 13, weight = 600, an = 5, color = waiting and T.onAccent or (k == '' and T.faint or T.ink), extra = clip })
+        if custom and not waiting then txt(kx - 12 * s, y + 22 * s, 'changed', { size = 11, an = 6, color = T.accent, extra = clip }) end
+        zone('set-key', x - 8 * s, y, w + 16 * s, 44 * s, { id = h.id })
+      end }
+    end
+  elseif name == 'About' then
+    rows[#rows + 1] = { h = 132, draw = function(x, y, w, clip)
+      txt(x, y + 76 * s, 'Dōga', { size = 48, weight = 600, an = 1, extra = clip })
+      txt(x + text_w('Dōga', 48 * s) + 16 * s, y + 70 * s, 'v' .. OPT.version, { size = 14, mono = true, an = 1, color = T.accentBright, extra = clip })
+      txt(x, y + 102 * s, 'Plays the file exactly as it was made.', { size = 14, color = T.muted, extra = clip })
+      fill(rect(x, y + 132 * s - 1 * s, w, 1 * s), T.line, 0, clip)
+    end }
+    local status = st.update_status or (st.update and ('Version ' .. st.update.version .. ' is available') or 'Checks GitHub at most once a day')
+    rows[#rows + 1] = row('Updates', status, function(rx, y, clip)
+      local bw
+      if st.update then
+        bw = sbutton(clip, 'update', rx, y, 'Update to ' .. st.update.version, nil, true)
+      else
+        bw = sbutton(clip, 'set-check-now', rx, y, 'Check now')
+      end
+      seg(clip, 'updates', rx - bw - 16 * s, y, { { 'Daily', true }, { 'Never', false } }, cfg.updates)
+    end, 64, 400)
+    rows[#rows + 1] = row('Engine', 'mpv ' .. (ENGINE.mpv or '') .. ' · FFmpeg ' .. (ENGINE.ffmpeg or '') .. ' · libplacebo (gpu-next, D3D11)', nil)
+    rows[#rows + 1] = row('Your settings', 'Settings, resume positions and recent files stay on this PC, in %APPDATA%\\Doga', function(rx, y, clip)
+      sbutton(clip, 'set-open-data', rx, y, 'Open folder')
+    end, 64, 150)
+    rows[#rows + 1] = row('Source & licenses', 'MIT · bundles libmpv (GPL-2.0+) and OFL fonts', function(rx, y, clip)
+      local w1 = sbutton(clip, 'set-open-url', rx, y, 'Licenses', { url = 'https://github.com/invictus-1/Doga/blob/main/THIRD_PARTY.md' })
+      sbutton(clip, 'set-open-url', rx - w1 - 8 * s, y, 'GitHub', { url = 'https://github.com/invictus-1/Doga' })
+    end, 64, 220)
+  end
+  return rows
+end
+
+local function draw_settings()
+  local S = st.settings
+  local s, W, H = st.s, st.w, st.h
+  fill(rect(0, 0, W, H), '000000', 0x50)
+  zone('set-backdrop', 0, 0, W, H)
+  local pw = math.min(W - 48 * s, 920 * s)
+  local ph = math.min(H - 48 * s, 640 * s)
+  local px, py = r((W - pw) / 2), r((H - ph) / 2)
+  fill(rect(px, py + 10 * s, pw, ph), '000000', 0x60, '\\blur16')
+  fill(cut(px, py, pw, ph, 10 * s), T.surface1)
+  stroke(cut(px, py, pw, ph, 10 * s), T.lineStrong, 1 * s)
+  zone('set-panel', px, py, pw, ph)
+  -- header
+  txt(px + 28 * s, py + 34 * s, 'Settings', { size = 20, weight = 600 })
+  local cx, cy = px + pw - 48 * s, py + 14 * s
+  if within(cx, cy, 36 * s, 36 * s) then fill(rect(cx, cy, 36 * s, 36 * s), T.surface2) end
+  icon('close', cx + 8 * s, cy + 8 * s, 20 * s, T.muted)
+  zone('set-close', cx, cy, 36 * s, 36 * s)
+  fill(rect(px, py + 64 * s, pw, 1 * s), T.line)
+  -- nav
+  local nx, nw = px + 12 * s, 176 * s
+  for i, name in ipairs(SECTIONS) do
+    local y = py + 76 * s + (i - 1) * 42 * s
+    local on = S.section == name
+    if on or within(nx, y, nw, 40 * s) then fill(rect(nx, y, nw, 40 * s), T.surface2) end
+    if on then fill(diamond(nx + 16 * s, y + 20 * s, 4.5 * s), T.accent) end
+    txt(nx + 32 * s, y + 20 * s, name, { size = 14, weight = on and 600 or 400, color = on and T.accentBright or T.ink })
+    zone('set-nav', nx, y, nw, 40 * s, { name = name })
+  end
+  fill(rect(px + 200 * s, py + 65 * s, 1 * s, ph - 65 * s), T.line)
+  -- content (scrolls, clipped)
+  local x0, y0 = px + 228 * s, py + 72 * s
+  local w0, h0 = pw - 256 * s, ph - 84 * s
+  local clip = string.format('\\clip(%d,%d,%d,%d)', r(x0 - 12 * s), r(y0), r(x0 + w0 + 12 * s), r(y0 + h0))
+  local rows = section_rows(S.section)
+  local total = 0
+  for _, rw in ipairs(rows) do total = total + rw.h * s end
+  S.max_scroll = math.max(0, total - h0)
+  S.scroll = math.max(0, math.min(S.scroll or 0, S.max_scroll))
+  zone('set-content', x0 - 12 * s, y0, w0 + 24 * s, h0)
+  local y = y0 - S.scroll
+  for _, rw in ipairs(rows) do
+    local rh = rw.h * s
+    if y + rh > y0 and y < y0 + h0 then
+      local nz = #zones
+      rw.draw(x0, y, w0, clip)
+      -- zones of rows cut by the clip must not catch clicks outside the visible area
+      for i = nz + 1, #zones do
+        local z = zones[i]
+        local top, bot = math.max(z.y, y0), math.min(z.y + z.h, y0 + h0)
+        if bot <= top then z.w = 0 else z.y, z.h = top, bot - top end
+      end
+    end
+    y = y + rh
+  end
+  if S.max_scroll > 0 then -- thin scroll indicator
+    local bh = h0 * h0 / (h0 + S.max_scroll)
+    fill(rect(px + pw - 6 * s, y0 + (h0 - bh) * S.scroll / S.max_scroll, 3 * s, bh), T.lineStrong)
+  end
+end
+
+local SET_ACT = {
+  ['set-close'] = close_settings,
+  ['set-backdrop'] = close_settings,
+  ['set-nav'] = function(z) stop_capture(); st.settings.section = z.data.name; st.settings.scroll = 0 end,
+  ['set-theme'] = function(z) set_theme(z.data.i); save_settings() end,
+  ['set-seg'] = function(z)
+    local id, v = z.data.id, z.data.value
+    cfg[id] = v
+    if id == 'updates' then st.update_status = v and 'Checks GitHub at most once a day' or 'Off · use “Check now” whenever you like' end
+    apply_cfg(); save_settings()
+  end,
+  ['set-device'] = function(z) cfg.audio_device = z.data.name; apply_cfg(); save_settings() end,
+  ['set-clear-lang'] = function(z)
+    local key = z.data.kind == 'audio' and 'alang' or 'slang'
+    st[key] = nil; mp.set_property(key, ''); save_settings()
+  end,
+  ['set-key'] = function(z) start_capture(z.data.id) end,
+  ['set-keys-reset'] = function() cfg.keys = {}; apply_keys(); save_settings(); osd('info', 'Hotkeys', 'back to the defaults') end,
+  ['set-check-now'] = function()
+    st.update_status = 'Checking…'
+    mp.commandv('script-message-to', 'main', 'doga-update-check')
+  end,
+  ['set-open-data'] = function() mp.commandv('script-message-to', 'main', 'doga-open-data') end,
+  ['set-open-url'] = function(z) mp.commandv('script-message-to', 'main', 'doga-open-url', z.data.url) end,
+}
+
+---------------------------------------------------------------------------
 -- Render
 ---------------------------------------------------------------------------
 local ov = mp.create_osd_overlay('ass-events')
@@ -1212,6 +1629,7 @@ render = function()
   if st.panel then draw_panel() end
   draw_osd(now)
   if st.cm then draw_context_menu() end
+  if st.settings then draw_settings() end
   if intro.frame_t0 and not st.idle then
     local t = now - intro.frame_t0
     if t < 0.7 then K.new({ out = out, s = st.s, T = T }):intro_frame(t, st.w, st.h) else intro.frame_t0 = nil end
@@ -1329,6 +1747,13 @@ local function on_left(e)
     render() -- make sure zones match what's on screen
     local z = hit()
     local now = mp.get_time()
+    if st.settings then
+      if st.capture and not (z and z.id == 'set-key') then stop_capture() end
+      if z and SET_ACT[z.id] then SET_ACT[z.id](z)
+      elseif z and ACTIONS[z.id] then ACTIONS[z.id](z) end
+      render()
+      return
+    end
     if st.cm then
       if z and z.id == 'cm-item' then cm_activate(z)
       elseif not (z and z.id == 'cm') then st.cm = nil end -- click outside just closes it
@@ -1415,9 +1840,11 @@ mp.add_key_binding(nil, 'cycle-sub-back', function() cycle('sub', -1) end)
 mp.add_key_binding(nil, 'vol-up', function() change_volume(5) end, { repeatable = true })
 mp.add_key_binding(nil, 'vol-down', function() change_volume(-5) end, { repeatable = true })
 mp.add_key_binding(nil, 'wheel-up', function()
+  if st.settings then st.settings.scroll = (st.settings.scroll or 0) - 56 * st.s; render(); return end
   if in_panel() then st.scroll = st.scroll - ROW_H * st.s; render() else change_volume(5) end
 end, { repeatable = true })
 mp.add_key_binding(nil, 'wheel-down', function()
+  if st.settings then st.settings.scroll = (st.settings.scroll or 0) + 56 * st.s; render(); return end
   if in_panel() then st.scroll = st.scroll + ROW_H * st.s; render() else change_volume(-5) end
 end, { repeatable = true })
 mp.add_key_binding(nil, 'mute', function()
@@ -1433,6 +1860,7 @@ mp.register_script_message('doga-update', function(state, version, extra)
   msg.info('update:', state, version or '', extra or '')
   if state == 'available' then
     st.update = { state = 'available', version = version }
+    st.update_status = 'Version ' .. version .. ' is available'
   elseif state == 'downloading' and st.update then
     st.update.state, st.update.pct = 'downloading', tonumber(extra) or 0
     osd('info', 'Update', 'downloading ' .. version, nil, { bar = st.update.pct })
@@ -1443,8 +1871,10 @@ mp.register_script_message('doga-update', function(state, version, extra)
     if st.update then st.update.state = 'available' end
   elseif state == 'current' then
     st.update = nil
+    st.update_status = 'Up to date (checked just now)'
     osd('info', 'Update', 'Dōga is up to date')
   elseif state == 'error' then
+    st.update_status = 'Couldn’t check: ' .. (version or 'unknown error')
     osd('info', 'Update', version or 'failed', nil, { off = true })
     if st.update then st.update.state = 'available' end
   end
@@ -1473,13 +1903,20 @@ mp.add_key_binding(nil, 'dblclick', function()
   if z and z.id == 'pl-row' then return end -- handled by the click timer
   if not z and not st.idle then mp.commandv('cycle', 'fullscreen') end
 end)
+mp.add_key_binding(nil, 'settings', function()
+  if st.settings then close_settings() else open_settings() end
+end)
+mp.add_key_binding(nil, 'seek-back', function() mp.commandv('no-osd', 'seek', -cfg.seek_step) end, { repeatable = true })
+mp.add_key_binding(nil, 'seek-fwd', function() mp.commandv('no-osd', 'seek', cfg.seek_step) end, { repeatable = true })
 mp.add_key_binding(nil, 'context-menu', function()
+  if st.settings then return end
   skip_intro()
   st.menu = nil
   st.cm = { x = st.mx, y = st.my, items = cm_main() }
   render()
 end)
 mp.add_key_binding(nil, 'escape', function()
+  if st.settings then close_settings(); return end
   if st.cm then st.cm = nil
   elseif st.menu then st.menu = nil
   elseif st.drag then st.drag = nil
@@ -1608,8 +2045,14 @@ do
     st.maximized = s.maximized and true or false
     st.alang = (s.alang and s.alang ~= '') and s.alang or nil
     st.slang = (s.slang and s.slang ~= '') and s.slang or nil
-    if s.volume then mp.set_property_number('volume', s.volume) end
+    for k, v in pairs(cfg) do
+      if s[k] ~= nil and type(s[k]) == type(v) then cfg[k] = s[k] end
+    end
+    if type(cfg.keys) ~= 'table' then cfg.keys = {} end
+    if cfg.volume_mode == 'remember' and s.volume then mp.set_property_number('volume', s.volume) end
   end
+  apply_cfg()
+  apply_keys()
   recent = read_json(recent_path) or {}
   if mp.get_property('path') and mp.get_property_native('duration') then boot_intro() end
 end
