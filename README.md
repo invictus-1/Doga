@@ -2,11 +2,29 @@
 
 A video player for Windows that plays the file exactly as it was made: no colour "enhancement", no gain tricks, no feature bloat.
 
+![Dōga playing an episode in the Nightshade theme, with the controls and the playlist panel open](docs/screenshots/player.png)
+
 - **Engine:** libmpv (`gpu-next` / libplacebo on D3D11), the same engine as mpv.
 - **Host:** a small Rust program with no dependencies (`src/`). It loads libmpv, applies the fidelity settings, fills the playlist with the opened file's series, and owns the Open dialog.
 - **Scrub thumbnails:** `src/thumbs.rs`. A second, hidden libmpv instance (no window, no audio, created on first hover) decodes only the nearest keyframe, scales it to preview size and hands the UI a memory pointer. The hovered position goes first, and neighbouring slots fill in while idle. The main video never waits on it.
 - **Chrome:** `ui/doga.lua`, drawn inside mpv's OSD layer so controls never lag or tear against the video.
 - **Look:** four dark themes and the drawing kit live in `ui/kit.lua`; the app icon is `assets/icon.svg`.
+
+## Screenshots
+
+Hovering the seek bar shows the frame, chapter and time at that spot. The badge at the top left (**I**) says the picture is shown exactly as stored.
+
+![Glacier theme: a thumbnail preview above the seek bar, and the info badge reading Exact](docs/screenshots/seek.png)
+
+Right-click for everything else: tracks, subtitle delay, speed, theme. The "Skip opening" button appears only while an opening chapter plays.
+
+![Carbon theme: the right-click menu with the Subtitles submenu open, and the Skip opening button](docs/screenshots/menu.png)
+
+Settings open over the video (**Ctrl+,**).
+
+![Redline theme: the General page of Settings with the four theme cards](docs/screenshots/settings.png)
+
+The video in these pictures is a set of test clips drawn for this page.
 
 ## Keys
 
@@ -60,7 +78,13 @@ Four dark themes, switched with **Ctrl+T**, the right-click menu or Settings. A 
 | **Redline** 紅 | hot pink-red | slanted speed stripes, blade seek thumb, stripe tab on panels |
 | **Carbon** 炭 | pure-black OLED, white accent | twill weave, square seek thumb, registration ticks on panels |
 
-Each theme also has its own start-screen cover. The installer and updater open in the theme you use.
+| Nightshade 夜 | Glacier 氷 |
+| --- | --- |
+| ![Start screen in the Nightshade theme](docs/screenshots/theme-nightshade.png) | ![Start screen in the Glacier theme](docs/screenshots/theme-glacier.png) |
+| **Redline 紅** | **Carbon 炭** |
+| ![Start screen in the Redline theme](docs/screenshots/theme-redline.png) | ![Start screen in the Carbon theme](docs/screenshots/theme-carbon.png) |
+
+Each theme also has its own start-screen cover, shown above. The installer and updater open in the theme you use.
 
 ## Little things that just work
 
@@ -69,6 +93,7 @@ Each theme also has its own start-screen cover. The installer and updater open i
 - **Continue:** the start screen's first row is the file you stopped in, or, when you finished it, the next episode you haven't watched. One click and you're back in.
 - **Same tracks for a whole series:** pick the dub, or the "Signs & Songs" subtitles, or subtitles off, in one episode and the rest of the series opens the same way. The pick is matched by language and track name, so it still lands on the right track when an episode orders its tracks differently. It only ever applies to that series. Settings › Playback turns it off.
 - **Watched marks:** the playlist shows a tick on episodes you finished and a thin line for how far you got in the ones you started.
+- **The playlist follows along:** the panel opens with the playing episode in the middle and scrolls to keep it in view as the series goes on. Scrolling by hand is left alone until the next episode starts.
 - **When something can't play:** a broken or unsupported file gets a plain message saying which file and why, and the playlist carries on.
 - **One window:** opening a video while Dōga is already open plays it in that window. Several files opened together from Explorer become one playlist.
 - **Preferred languages:** right-click › Audio or Subtitles › "For every file" › "Prefer Japanese" (or whichever language is playing). New files then pick that track automatically. Files you've already watched keep the tracks you chose for them.
@@ -133,7 +158,7 @@ cargo run -- "D:\Anime\Show - 01.mkv"
 
 Every push and pull request is built and tested by GitHub Actions (`.github/workflows/ci.yml`: `cargo build`, then `cargo test`, on Windows).
 
-Settings, resume positions, recent files and the tracks picked per series (`series.json`) are stored in `%APPDATA%\Doga`, or in `data\` beside `doga.exe` when a `portable.txt` sits there. The window opens the way you last left it: maximized, or windowed and fitted to the video. Fullscreen is always manual.
+Settings, resume positions, recent files and the tracks picked per series (`series.json`) are stored in `%APPDATA%\Doga`, or in `data\` beside `doga.exe` when a `portable.txt` sits there. A `cache` folder beside them holds compiled shaders, which is why the second launch onward opens faster; deleting it is harmless. The window opens the way you last left it: maximized, or windowed and fitted to the video. Fullscreen is always manual.
 
 ## Series detection
 
