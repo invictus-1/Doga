@@ -50,7 +50,12 @@ fn entry(out: &mut Vec<u8>, ty: u16, name: u16, flags: u16, data: &[u8]) {
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/doga.ico");
+    println!("cargo:rerun-if-changed=assets/update.pub");
     println!("cargo:rerun-if-changed=build.rs");
+    // public half of the release signing key; without one the updater stays off
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let public = std::fs::read("assets/update.pub").unwrap_or_default();
+    std::fs::write(out_dir.join("update.pub"), public).unwrap();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }

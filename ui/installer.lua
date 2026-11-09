@@ -12,6 +12,9 @@ local OPT = {
   version = mp.get_opt('setup-version') or '',
   existing = mp.get_opt('setup-existing') == 'yes',
   dry = mp.get_opt('setup-dryrun') == 'yes',
+  auto = mp.get_opt('setup-auto') == 'yes',
+  desktop = mp.get_opt('setup-desktop') ~= 'no',
+  assoc = mp.get_opt('setup-assoc') ~= 'no',
 }
 package.path = OPT.uidir .. '/?.lua;' .. package.path
 local K = require 'kit'
@@ -20,7 +23,7 @@ local T = K.colors(1)
 local st = {
   w = 0, h = 0, s = 1, mx = -1, my = -1,
   screen = 'welcome', screen_t0 = 0, t0 = mp.get_time(),
-  dir = OPT.dir, desktop = true, assoc = true,
+  dir = OPT.dir, desktop = OPT.desktop, assoc = OPT.assoc,
   target = 0, shown = 0, label = '', err = nil,
   press = nil,
 }
@@ -142,7 +145,9 @@ local function render()
     local where = 'Find it in the Start menu' .. (st.desktop and ' and on your desktop.' or '.')
     ctx:txt(x0 + 64 * s, y0 + 36 * s, where, { size = 14, color = T.muted, alpha = a })
     local ly = y0 + 92 * s
-    if st.assoc then
+    if OPT.auto then
+      ctx:txt(x0 + 64 * s, ly - 10 * s, 'Reopening Dōga…', { size = 14, color = T.accentBright, alpha = a })
+    elseif st.assoc then
       ctx:fill(K.cut(x0, ly, math.min(W - x0 * 2, 640 * s), 64 * s, 6 * s), T.surface1, a)
       ctx:icon('info', x0 + 16 * s, ly + 20 * s, 24 * s, T.signal, a)
       ctx:txt(x0 + 52 * s, ly + 22 * s, 'One more step to open videos with Dōga', { size = 14, weight = 600, alpha = a })
@@ -170,6 +175,8 @@ local function render()
   ov:update()
 end
 
+local start_install -- defined below
+
 -- 60 fps while something moves; otherwise render on input
 mp.add_periodic_timer(1 / 60, function()
   local now = mp.get_time()
@@ -181,13 +188,23 @@ mp.add_periodic_timer(1 / 60, function()
       go(st.final or 'done')
     end
   end
+  -- update mode: install by itself after the intro, then reopen Dōga
+  if OPT.auto then
+    if st.screen == 'welcome' and not st.auto_started and now - st.t0 > 1.4 then
+      st.auto_started = true
+      start_install()
+    elseif st.screen == 'done' and not st.auto_launched and now - st.screen_t0 > 1.2 then
+      st.auto_launched = true
+      mp.commandv('script-message-to', 'main', 'setup-launch', st.dir)
+    end
+  end
   if now - st.t0 < 1.5 or now - st.screen_t0 < 0.4 or st.screen == 'installing' then render() end
 end)
 
 ---------------------------------------------------------------------------
 -- input
 ---------------------------------------------------------------------------
-local function start_install()
+start_install = function()
   st.target, st.shown, st.label, st.done_at, st.final = 0, 0, 'Preparing', nil, nil
   go('installing')
   mp.commandv('script-message-to', 'main', 'setup-install', st.dir, st.desktop and '1' or '0', st.assoc and '1' or '0')

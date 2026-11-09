@@ -1,6 +1,6 @@
 [package]
 name = "doga"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Dōga — a video player that plays the file exactly as it was made."
 publish = false

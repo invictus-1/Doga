@@ -11,6 +11,7 @@ mod setup;
 mod splash;
 mod sys;
 mod thumbs;
+mod update;
 mod win;
 
 use std::path::{Path, PathBuf};
@@ -71,6 +72,23 @@ fn main() {
                 eprintln!("pack failed: {e}");
                 std::process::exit(1);
             }
+        }
+        return;
+    }
+    // release tooling: doga.exe --gen-update-key   |   doga.exe --sign <file>
+    if argv.get(1).map(String::as_str) == Some("--gen-update-key") {
+        let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)).unwrap_or_default();
+        let root = find_up(&exe_dir, &["Cargo.toml"]).and_then(|p| p.parent().map(Path::to_path_buf));
+        if let Err(e) = root.ok_or("project root not found".to_string()).and_then(|r| update::gen_key(&r)) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if argv.get(1).map(String::as_str) == Some("--sign") {
+        if let Err(e) = argv.get(2).ok_or("usage: --sign <file>".to_string()).and_then(|f| update::sign(Path::new(f))) {
+            eprintln!("{e}");
+            std::process::exit(1);
         }
         return;
     }
@@ -138,6 +156,10 @@ fn run_player() {
     for (i, f) in args.iter().enumerate() {
         let _ = mpv.command(&["loadfile", f, if i == 0 { "replace" } else { "append" }]);
     }
+    // quiet daily update check (debug test runs only with DOGA_UPDATE_TEST set)
+    if !cfg!(debug_assertions) || std::env::var_os("DOGA_UPDATE_TEST").is_some() {
+        update::spawn_daily_check(mpv.clone(), data.clone());
+    }
     if !dev_run {
         let (tx, rx) = std::sync::mpsc::channel();
         ipc::serve(tx);
@@ -160,6 +182,7 @@ fn run_player() {
             Ev::FileLoaded => on_file_loaded(&mpv),
             Ev::ClientMessage(args) => match args.first().map(String::as_str) {
                 Some("doga-open") => open_dialog(&mpv),
+                Some("doga-update-install") => update::spawn_install(mpv.clone()),
                 Some("doga-thumb") => {
                     if let Some(r) = thumbs::Req::parse(&args) {
                         let _ = thumbs.send(r);

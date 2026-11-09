@@ -879,6 +879,21 @@ local function draw_idle(vw)
   txt(gx, by - 8 * s, instr, { size = 14, color = T.muted, an = 1, alpha = a1 })
   zone('idle-open', gx, by - 30 * s, text_w(instr, 14 * s), 24 * s)
 
+  -- a newer Dōga is out: one quiet chip, top-left
+  if st.update then
+    local label = st.update.state == 'downloading' and string.format('Downloading %s… %d%%', st.update.version, st.update.pct or 0)
+      or ('Update to ' .. st.update.version)
+    local uw, uh = text_w(label, 13 * s) + 52 * s, 36 * s
+    local ux, uy = gx, 32 * s
+    local hov = within(ux, uy, uw, uh) and st.update.state ~= 'downloading'
+    local ua = 255 - K.span(t, 1.0, 1.3) * 255
+    fill(cut(ux, uy, uw, uh, 6 * s), hov and T.accent or T.surface1, ua)
+    stroke(cut(ux, uy, uw, uh, 6 * s), T.accent, 1.5 * s, ua)
+    txt(ux + 16 * s, uy + uh / 2, label, { size = 13, weight = 600, color = hov and T.onAccent or T.ink, alpha = ua })
+    ctx:icon('chev', ux + uw - 30 * s, uy + uh / 2 - 8 * s, 16 * s, hov and T.onAccent or T.accent, ua)
+    zone('update', ux, uy, uw, uh)
+  end
+
   if #recent > 0 then
     local split = vw >= 860 * s
     local rx = split and (vw / 2) or gx
@@ -1018,10 +1033,25 @@ local function cm_theme()
   return it
 end
 
+local function start_update()
+  if not st.update or st.update.state == 'downloading' then return end
+  st.update.state, st.update.pct = 'downloading', 0
+  mp.commandv('script-message-to', 'main', 'doga-update-install')
+  osd('info', 'Update', 'downloading ' .. st.update.version)
+end
+
 local function cm_main()
   local nofile = st.idle
   local sp = mp.get_property_number('speed') or 1
-  return {
+  local top = {}
+  if st.update then
+    if st.update.state == 'downloading' then
+      top = { { label = string.format('Downloading update… %d%%', st.update.pct or 0), disabled = true }, { sep = true } }
+    else
+      top = { { label = 'Update to ' .. st.update.version, value = 'new', fn = start_update }, { sep = true } }
+    end
+  end
+  local items = {
     { label = 'Open file…', key = 'O', fn = function() mp.commandv('script-message-to', 'main', 'doga-open') end },
     { sep = true },
     { label = 'Audio', sub = cm_audio, value = not nofile and chip_label('audio') or nil, disabled = nofile },
@@ -1034,6 +1064,8 @@ local function cm_main()
     { label = 'Info', key = 'I', check = st.info, disabled = nofile, fn = function() st.info = not st.info end },
     { label = 'Fullscreen', key = 'F', check = st.fs, fn = function() mp.commandv('cycle', 'fullscreen') end },
   }
+  for i = #top, 1, -1 do table.insert(items, 1, top[i]) end
+  return items
 end
 
 local function cm_height(items)
@@ -1277,6 +1309,7 @@ local ACTIONS = {
     end
   end,
   recent = function(z) mp.commandv('loadfile', z.data.path, 'replace') end,
+  update = function() start_update() end,
   skip = function(z)
     local nxt = st.chapters[z.data.i + 2]
     if nxt then
@@ -1395,6 +1428,29 @@ end)
 mp.add_key_binding(nil, 'toggle-playlist', function()
   st.panel = not st.panel; apply_margin(); save_settings(); render()
 end)
+-- From the host's updater (src/update.rs).
+mp.register_script_message('doga-update', function(state, version, extra)
+  msg.info('update:', state, version or '', extra or '')
+  if state == 'available' then
+    st.update = { state = 'available', version = version }
+  elseif state == 'downloading' and st.update then
+    st.update.state, st.update.pct = 'downloading', tonumber(extra) or 0
+    osd('info', 'Update', 'downloading ' .. version, nil, { bar = st.update.pct })
+  elseif state == 'verifying' then
+    osd('info', 'Update', 'checking the signature')
+  elseif state == 'verified' then
+    osd('info', 'Update', version .. ' downloaded and verified (dry run)')
+    if st.update then st.update.state = 'available' end
+  elseif state == 'current' then
+    st.update = nil
+    osd('info', 'Update', 'Dōga is up to date')
+  elseif state == 'error' then
+    osd('info', 'Update', version or 'failed', nil, { off = true })
+    if st.update then st.update.state = 'available' end
+  end
+  render()
+end)
+
 mp.register_script_message('doga-panel', function(v)
   st.panel = v == 'open'; apply_margin(); save_settings(); render()
 end)

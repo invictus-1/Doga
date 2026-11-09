@@ -118,14 +118,23 @@ pub fn run_installer(pl: Payload) {
     mpv.opt("osd-font", ui_font);
     mpv.opt("scripts", &fwd(&ui.join("installer.lua")));
     let existing = dir.join("doga.exe").is_file();
+    // `--update` (started by Dōga's updater): install on its own, keep the previous choices,
+    // relaunch when done.
+    let auto = std::env::args().any(|a| a == "--update") && existing;
+    let had_desktop = sys::reg_get_str(UNINSTALL_KEY, "DesktopShortcut").map(|v| v == "1");
+    let had_assoc = sys::reg_key_exists(&format!(r"Software\Classes\{PROGID}"));
+    let yn = |b: bool| if b { "yes" } else { "no" };
     mpv.opt(
         "script-opts",
         &format!(
-            "doga-uidir={},doga-uifont={ui_font},doga-monofont={mono_font},setup-dir={},setup-version={VERSION},setup-existing={},setup-dryrun={}",
+            "doga-uidir={},doga-uifont={ui_font},doga-monofont={mono_font},setup-dir={},setup-version={VERSION},setup-existing={},setup-dryrun={},setup-auto={},setup-desktop={},setup-assoc={}",
             fwd(&ui),
             fwd(&dir),
-            if existing { "yes" } else { "no" },
-            if dry_run() { "yes" } else { "no" }
+            yn(existing),
+            yn(dry_run()),
+            yn(auto),
+            yn(had_desktop.unwrap_or(true)),
+            yn(if existing { had_assoc } else { true })
         ),
     );
     if let Err(e) = mpv.initialize() {
@@ -220,13 +229,19 @@ fn install(m: &Mpv, pl: &Payload, unpacked: &Path, dir: &Path, desktop: bool, as
     std::fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
     progress(m, 0.0, "Copying the player");
     let target_exe = dir.join("doga.exe");
-    std::fs::write(&target_exe, &exe).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            "Dōga is running. Close it and try again.".to_string()
-        } else {
-            format!("Could not write doga.exe: {e}")
+    // when updating, the old Dōga may still be closing: give it a moment
+    let t0 = std::time::Instant::now();
+    loop {
+        match std::fs::write(&target_exe, &exe) {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && t0.elapsed().as_secs() < 15 => {
+                progress(m, 0.0, "Waiting for Dōga to close");
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Err("Dōga is running. Close it and try again.".into()),
+            Err(e) => return Err(format!("Could not write doga.exe: {e}")),
         }
-    })?;
+    }
     done += exe.len() as u64;
 
     for (rel, size) in &files {

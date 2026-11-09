@@ -121,6 +121,98 @@ pub fn decompress(algo: u32, data: &[u8], raw_len: usize) -> Option<Vec<u8>> {
     }
 }
 
+// ---------------------------------------------------------------- hashing & signatures (bcrypt)
+
+#[link(name = "bcrypt")]
+extern "system" {
+    fn BCryptOpenAlgorithmProvider(h: *mut Handle, alg: *const u16, imp: *const u16, flags: u32) -> i32;
+    fn BCryptCloseAlgorithmProvider(h: Handle, flags: u32) -> i32;
+    fn BCryptHash(alg: Handle, secret: *const u8, n: u32, input: *const u8, len: u32, out: *mut u8, outlen: u32) -> i32;
+    fn BCryptGenerateKeyPair(alg: Handle, key: *mut Handle, bits: u32, flags: u32) -> i32;
+    fn BCryptFinalizeKeyPair(key: Handle, flags: u32) -> i32;
+    fn BCryptExportKey(key: Handle, exp: Handle, blob_type: *const u16, out: *mut u8, n: u32, written: *mut u32, flags: u32) -> i32;
+    fn BCryptImportKeyPair(alg: Handle, imp: Handle, blob_type: *const u16, key: *mut Handle, blob: *const u8, n: u32, flags: u32) -> i32;
+    fn BCryptSignHash(key: Handle, pad: *const c_void, hash: *const u8, n: u32, sig: *mut u8, cap: u32, written: *mut u32, flags: u32) -> i32;
+    fn BCryptVerifySignature(key: Handle, pad: *const c_void, hash: *const u8, n: u32, sig: *const u8, sn: u32, flags: u32) -> i32;
+    fn BCryptDestroyKey(key: Handle) -> i32;
+}
+
+fn alg(name: &str) -> Option<Handle> {
+    let w = wide(OsStr::new(name));
+    let mut h: Handle = std::ptr::null_mut();
+    (unsafe { BCryptOpenAlgorithmProvider(&mut h, w.as_ptr(), std::ptr::null(), 0) } == 0).then_some(h)
+}
+
+pub fn sha256(data: &[u8]) -> Option<[u8; 32]> {
+    let h = alg("SHA256")?;
+    let mut out = [0u8; 32];
+    let rc = unsafe { BCryptHash(h, std::ptr::null(), 0, data.as_ptr(), data.len() as u32, out.as_mut_ptr(), 32) };
+    unsafe { BCryptCloseAlgorithmProvider(h, 0) };
+    (rc == 0).then_some(out)
+}
+
+/// New ECDSA P-256 key pair → (private blob, public blob).
+pub fn ecdsa_generate() -> Option<(Vec<u8>, Vec<u8>)> {
+    let a = alg("ECDSA_P256")?;
+    let mut key: Handle = std::ptr::null_mut();
+    let ok = unsafe { BCryptGenerateKeyPair(a, &mut key, 256, 0) == 0 && BCryptFinalizeKeyPair(key, 0) == 0 };
+    let export = |kind: &str| -> Option<Vec<u8>> {
+        let t = wide(OsStr::new(kind));
+        let mut n = 0u32;
+        unsafe { BCryptExportKey(key, std::ptr::null_mut(), t.as_ptr(), std::ptr::null_mut(), 0, &mut n, 0) };
+        let mut buf = vec![0u8; n as usize];
+        (unsafe { BCryptExportKey(key, std::ptr::null_mut(), t.as_ptr(), buf.as_mut_ptr(), n, &mut n, 0) } == 0).then(|| {
+            buf.truncate(n as usize);
+            buf
+        })
+    };
+    let r = if ok { export("ECCPRIVATEBLOB").zip(export("ECCPUBLICBLOB")) } else { None };
+    unsafe {
+        if !key.is_null() {
+            BCryptDestroyKey(key);
+        }
+        BCryptCloseAlgorithmProvider(a, 0);
+    }
+    r
+}
+
+fn with_ecc_key<T>(blob: &[u8], kind: &str, f: impl FnOnce(Handle) -> T) -> Option<T> {
+    let a = alg("ECDSA_P256")?;
+    let t = wide(OsStr::new(kind));
+    let mut key: Handle = std::ptr::null_mut();
+    let rc = unsafe { BCryptImportKeyPair(a, std::ptr::null_mut(), t.as_ptr(), &mut key, blob.as_ptr(), blob.len() as u32, 0) };
+    let r = (rc == 0).then(|| f(key));
+    unsafe {
+        if !key.is_null() {
+            BCryptDestroyKey(key);
+        }
+        BCryptCloseAlgorithmProvider(a, 0);
+    }
+    r
+}
+
+/// Sign SHA-256(data) with a private key blob → 64-byte signature (r ‖ s).
+pub fn ecdsa_sign(private_blob: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+    let hash = sha256(data)?;
+    with_ecc_key(private_blob, "ECCPRIVATEBLOB", |k| {
+        let mut sig = vec![0u8; 64];
+        let mut n = 0u32;
+        let rc = unsafe { BCryptSignHash(k, std::ptr::null(), hash.as_ptr(), 32, sig.as_mut_ptr(), 64, &mut n, 0) };
+        (rc == 0 && n == 64).then_some(sig)
+    })
+    .flatten()
+}
+
+/// True only if `sig` is a valid signature of SHA-256(data) under the public key blob.
+pub fn ecdsa_verify(public_blob: &[u8], data: &[u8], sig: &[u8]) -> bool {
+    let Some(hash) = sha256(data) else { return false };
+    if sig.len() != 64 || public_blob.is_empty() {
+        return false;
+    }
+    with_ecc_key(public_blob, "ECCPUBLICBLOB", |k| unsafe { BCryptVerifySignature(k, std::ptr::null(), hash.as_ptr(), 32, sig.as_ptr(), 64, 0) == 0 })
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------- registry (HKCU)
 
 fn with_key<T>(sub: &str, f: impl FnOnce(Hkey) -> T) -> Option<T> {
@@ -183,6 +275,20 @@ pub fn reg_delete_tree(sub: &str) {
     }
     let w = wide(OsStr::new(sub));
     unsafe { RegDeleteTreeW(HKCU, w.as_ptr()) };
+}
+
+pub fn reg_key_exists(sub: &str) -> bool {
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegOpenKeyExW(k: Hkey, sub: *const u16, o: u32, sam: u32, out: *mut Hkey) -> i32;
+    }
+    let w = wide(OsStr::new(sub));
+    let mut k: Hkey = 0;
+    let rc = unsafe { RegOpenKeyExW(HKCU, w.as_ptr(), 0, 0x20019, &mut k) };
+    if rc == 0 {
+        unsafe { RegCloseKey(k) };
+    }
+    rc == 0
 }
 
 pub fn reg_delete_value(sub: &str, name: &str) {
@@ -313,6 +419,30 @@ pub fn ask(title: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sha256_known_vector() {
+        let h = sha256(b"abc").unwrap();
+        let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn signatures_accept_signed_and_reject_tampered() {
+        let (private, public) = ecdsa_generate().unwrap();
+        let data = b"Doga-Setup-9.9.9.exe contents".to_vec();
+        let sig = ecdsa_sign(&private, &data).unwrap();
+        assert!(ecdsa_verify(&public, &data, &sig));
+        let mut tampered = data.clone();
+        tampered[0] ^= 1;
+        assert!(!ecdsa_verify(&public, &tampered, &sig));
+        let mut bad_sig = sig.clone();
+        bad_sig[10] ^= 1;
+        assert!(!ecdsa_verify(&public, &data, &bad_sig));
+        let (_, other_public) = ecdsa_generate().unwrap();
+        assert!(!ecdsa_verify(&other_public, &data, &sig));
+        assert!(!ecdsa_verify(&[], &data, &sig));
+    }
 
     #[test]
     fn compression_round_trip() {

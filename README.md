@@ -52,6 +52,20 @@ powershell -File tools/build-installer.ps1
 
 The installer is `doga.exe` with a compressed payload appended (`src/pack.rs`; Windows' built-in XPRESS-Huffman compression). On launch it shows a native placeholder window at once, unpacks the engine to a temp folder, and draws its UI with the same engine and kit as the player (`ui/installer.lua`, `ui/kit.lua`). Run with `DOGA_SETUP_DRYRUN=1` (and optionally `DOGA_SETUP_DIR=<folder>`) to test without touching shortcuts or the registry.
 
+## Updates
+
+A few seconds after launch, at most once a day, Dōga asks GitHub whether there's a newer release. That request is the only thing it ever sends over the network. If a newer release exists, "Update to x.y.z" appears on the start screen and at the top of the right-click menu, and nothing interrupts what you're watching. Clicking it:
+1. downloads the installer and its signature,
+2. checks the signature against the key built into Dōga, and refuses anything that doesn't match,
+3. updates in place, keeping your settings and choices, and reopens Dōga.
+
+To switch the check off, add `"updates":false` to `%APPDATA%\Doga\settings.json`.
+
+### Releasing (maintainers)
+
+- One time: `doga.exe --gen-update-key`. This writes the private key to `%USERPROFILE%\.doga-release\update.key` and the public key to `assets/update.pub`. Back up the private key and never commit it. Losing it means a new key, and everyone has to update by hand once.
+- Each release: bump `version` in `Cargo.toml`, then run `tools/build-installer.ps1`. It builds, packs and signs `dist/Doga-Setup-<version>.exe(.sig)`. Upload both files to a GitHub release tagged `v<version>`.
+
 ## Startup animation
 
 - **No file:** the start screen assembles itself from the design system's cover in about 1.3 s: a scanline sweep, the blocks sliding in, and the name glitching in. A click skips it.
