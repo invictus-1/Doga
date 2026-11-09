@@ -77,7 +77,8 @@ local function write_json(p, t)
   f:write(s); f:close(); os.remove(p); os.rename(p .. '.tmp', p)
 end
 local function save_settings()
-  write_json(settings_path, { theme = THEMES[theme_i].id, panel = st.panel, volume = st.volume, maximized = st.maximized and true or false })
+  write_json(settings_path, { theme = THEMES[theme_i].id, panel = st.panel, volume = st.volume, maximized = st.maximized and true or false,
+    alang = st.alang or '', slang = st.slang or '' })
 end
 
 ---------------------------------------------------------------------------
@@ -725,6 +726,40 @@ local function draw_panel()
   end
 end
 
+-- Skip button: shown while the current chapter is an opening or ending (by its title).
+-- Files without chapters never show it.
+local SKIP_KINDS = {
+  { label = 'Skip opening', pats = { '^op$', '^op[%s%d%-_:]', '^opening', '^intro', '^avant', 'opening$', 'オープニング' } },
+  { label = 'Skip ending', pats = { '^ed$', '^ed[%s%d%-_:]', '^ending', '^outro', '^credits', 'ending$', 'エンディング' } },
+}
+local function skip_label(title)
+  local t = (title or ''):lower():gsub('^%s+', '')
+  for _, k in ipairs(SKIP_KINDS) do
+    for _, p in ipairs(k.pats) do if t:find(p) then return k.label end end
+  end
+end
+
+local function draw_skip(vw, vis)
+  if st.idle or st.dur <= 0 or not st.chapter or st.chapter < 0 then return end
+  local c = st.chapters[st.chapter + 1]
+  local label = c and skip_label(c.title)
+  if not label then return end
+  local s = st.s
+  local bw, bh = text_w(label, 14 * s) + 66 * s, 44 * s
+  local x = vw - 24 * s - bw
+  local y = vis and (st.h - BAR_H * s - 16 * s - bh) or (st.h - 32 * s - bh)
+  local hov = within(x, y, bw, bh)
+  if hov then
+    fill(cut(x, y, bw, bh, 8 * s), T.accent)
+  else
+    fill(cut(x, y, bw, bh, 8 * s), T.scrim, SCRIM_A)
+    stroke(cut(x, y, bw, bh, 8 * s), T.accent, 1.5 * s)
+  end
+  txt(x + 20 * s, y + bh / 2, label, { size = 14, weight = 600, color = hov and T.onAccent or T.ink })
+  icon('chev', x + bw - 36 * s, y + bh / 2 - 9 * s, 18 * s, hov and T.onAccent or T.accent)
+  zone('skip', x, y, bw, bh, { i = st.chapter })
+end
+
 local function draw_osd(now)
   if not st.osd or now > st.osd_until then return end
   local s, o = st.s, st.osd
@@ -877,6 +912,34 @@ local CM_W, CM_SUB_W, CM_ROW, CM_HEAD, CM_SEP, CM_PAD = 248, 300, 32, 26, 9, 6
 
 local function radio(label, on, fn, meta) return { label = label, radio = true, on = on, fn = fn, meta = meta } end
 
+-- "For every file": a preferred language for audio / subtitles, stored in settings and
+-- applied through mpv's alang / slang, so new files pick it automatically.
+local function pref_items(kind)
+  local key, prop = kind == 'audio' and 'alang' or 'slang', kind == 'audio' and 'alang' or 'slang'
+  local cur = selected(kind)
+  local cur_lang = cur and cur.lang and cur.lang ~= '' and cur.lang:lower() or nil
+  local pref = st[key]
+  local function set(v)
+    st[key] = v
+    mp.set_property(prop, v or '')
+    save_settings()
+    osd(kind == 'audio' and 'audio' or 'subs', kind == 'audio' and 'Audio' or 'Subtitles',
+      v and ('prefer ' .. lang_name(v) .. ' in every file') or 'use each file\'s default')
+  end
+  local it = { { sep = true }, { header = 'FOR EVERY FILE' } }
+  it[#it + 1] = radio('Each file\'s default', pref == nil, function() set(nil) end)
+  it[#it].keep = true
+  if pref then
+    it[#it + 1] = radio('Prefer ' .. lang_name(pref), true, function() end)
+    it[#it].keep = true
+  end
+  if cur_lang and cur_lang ~= pref then
+    it[#it + 1] = radio('Prefer ' .. lang_name(cur_lang), false, function() set(cur_lang) end)
+    it[#it].keep = true
+  end
+  return it
+end
+
 local function cm_audio()
   local it = {}
   local list = tracks_of('audio')
@@ -884,6 +947,7 @@ local function cm_audio()
   for _, t in ipairs(list) do
     it[#it + 1] = radio(track_name(t), t.selected, function() mp.set_property_number('aid', t.id); show_track_osd('audio', t) end, track_meta(t))
   end
+  for _, p in ipairs(pref_items('audio')) do it[#it + 1] = p end
   return it
 end
 
@@ -898,6 +962,7 @@ local function cm_subs()
   it[#it + 1] = { label = 'Earlier by 50 ms', key = 'Z', keep = true, fn = function() mp.commandv('add', 'sub-delay', -0.05) end }
   it[#it + 1] = { label = 'Later by 50 ms', key = 'X', keep = true, fn = function() mp.commandv('add', 'sub-delay', 0.05) end }
   it[#it + 1] = { label = 'Reset delay', keep = true, disabled = math.abs(d) < 0.001, fn = function() mp.set_property_number('sub-delay', 0) end }
+  for _, p in ipairs(pref_items('sub')) do it[#it + 1] = p end
   return it
 end
 
@@ -1110,6 +1175,7 @@ render = function()
       if st.menu then draw_menu(vw) end
     end
     if st.info then draw_info(vw) end
+    draw_skip(vw, vis)
   end
   if st.panel then draw_panel() end
   draw_osd(now)
@@ -1211,6 +1277,16 @@ local ACTIONS = {
     end
   end,
   recent = function(z) mp.commandv('loadfile', z.data.path, 'replace') end,
+  skip = function(z)
+    local nxt = st.chapters[z.data.i + 2]
+    if nxt then
+      mp.commandv('seek', nxt.time, 'absolute')
+    elseif (mp.get_property_number('playlist-pos') or 0) + 1 < (mp.get_property_number('playlist-count') or 0) then
+      mp.commandv('playlist-next')
+    else
+      mp.commandv('seek', math.max(0, st.dur - 0.5), 'absolute')
+    end
+  end,
 }
 
 local function on_left(e)
@@ -1401,6 +1477,37 @@ obs('media-title', 'string', function(v) st.title = v or '' end)
 obs('path', 'string', function(v) st.path = v end)
 obs('track-list', 'native', function(v) st.tracks = v or {} end)
 obs('chapter-list', 'native', function(v) st.chapters = v or {} end)
+obs('chapter', 'number', function(v) st.chapter = v end)
+
+-- Files dropped on the window (routed by the host so we know where they landed):
+-- on the playlist → inserted at that row; subtitle files → added to the current video;
+-- anywhere else → they replace what's playing (and the series fills in as usual).
+local SUB_EXT = { srt = true, ass = true, ssa = true, vtt = true, sub = true, sup = true, idx = true }
+mp.register_script_message('doga-drop', function(x, y, ...)
+  local files = { ... }
+  x, y = tonumber(x) or 0, tonumber(y) or 0
+  skip_intro()
+  local subs, media = {}, {}
+  for _, f in ipairs(files) do
+    local ext = (f:match('%.([%w]+)$') or ''):lower()
+    if SUB_EXT[ext] then subs[#subs + 1] = f else media[#media + 1] = f end
+  end
+  if #media == 0 then
+    if #subs > 0 and not st.idle then
+      for i, f in ipairs(subs) do mp.commandv('sub-add', f, i == 1 and 'select' or 'auto') end
+      osd('subs', 'Subtitles', 'added ' .. basename(subs[1]))
+    end
+    return
+  end
+  if st.panel and x >= st.w - panel_w() and #st.playlist > 0 then
+    st.mx, st.my = x, y
+    local slot = row_slot()
+    for i, f in ipairs(media) do mp.commandv('loadfile', f, 'insert-at', tostring(slot - 2 + i)) end
+    osd('list', 'Playlist', #media == 1 and ('added ' .. clean_title(media[1])) or (#media .. ' videos added'))
+  else
+    for i, f in ipairs(media) do mp.commandv('loadfile', f, i == 1 and 'replace' or 'append') end
+  end
+end)
 obs('playlist', 'native', function(v) st.playlist = v or {} end)
 mp.register_script_message('doga-series', function(j)
   st.series = j and utils.parse_json(j) or nil
@@ -1443,6 +1550,8 @@ do
     for i, t in ipairs(THEMES) do if t.id == s.theme then set_theme(i) end end
     st.panel = s.panel and true or false
     st.maximized = s.maximized and true or false
+    st.alang = (s.alang and s.alang ~= '') and s.alang or nil
+    st.slang = (s.slang and s.slang ~= '') and s.slang or nil
     if s.volume then mp.set_property_number('volume', s.volume) end
   end
   recent = read_json(recent_path) or {}

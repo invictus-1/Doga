@@ -3,6 +3,7 @@
 // folder/series detection and the Open dialog. The on-screen chrome lives in ui/doga.lua.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ipc;
 mod mpv;
 mod pack;
 mod series;
@@ -103,6 +104,22 @@ fn run_player() {
     let data = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| exe_dir.clone()).join("Doga");
     let _ = std::fs::create_dir_all(data.join("watch_later"));
 
+    // Files from the command line / "Open with" / a drop onto the exe.
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| {
+            let p = PathBuf::from(&a);
+            if p.exists() { std::path::absolute(&p).unwrap_or(p).to_string_lossy().into_owned() } else { a.to_string_lossy().into_owned() }
+        })
+        .collect();
+
+    // One window: if Dōga is already open, hand it the files (or bring it forward) and leave.
+    // (Debug UI test runs opt out so they never touch a Dōga you have open.)
+    let dev_run = cfg!(debug_assertions) && std::env::var_os("DOGA_DEV_SCRIPT").is_some();
+    if !dev_run && ipc::another_instance() && ipc::forward(&args) {
+        return;
+    }
+
     let mpv = match Mpv::load(&dll) {
         Ok(m) => m,
         Err(e) => {
@@ -118,16 +135,20 @@ fn run_player() {
     let mpv = Arc::new(mpv);
     let thumbs = thumbs::spawn(mpv.clone(), dll.clone());
 
-    // Files from the command line / "Open with" / a drop onto the exe.
-    let args: Vec<String> = std::env::args_os()
-        .skip(1)
-        .map(|a| {
-            let p = PathBuf::from(&a);
-            if p.exists() { std::path::absolute(&p).unwrap_or(p).to_string_lossy().into_owned() } else { a.to_string_lossy().into_owned() }
-        })
-        .collect();
     for (i, f) in args.iter().enumerate() {
         let _ = mpv.command(&["loadfile", f, if i == 0 { "replace" } else { "append" }]);
+    }
+    if !dev_run {
+        let (tx, rx) = std::sync::mpsc::channel();
+        ipc::serve(tx);
+        let m = mpv.clone();
+        std::thread::spawn(move || ipc_loop(m, rx));
+    } else {
+        // tests still get the drop handling
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = ipc::serve_drops_only(tx);
+        let m = mpv.clone();
+        std::thread::spawn(move || ipc_loop(m, rx));
     }
 
     let mut dev = DevScript::from_env();
@@ -147,6 +168,49 @@ fn run_player() {
                 _ => {}
             },
             _ => {}
+        }
+    }
+}
+
+/// Files from other launches, and drops on the player window.
+fn ipc_loop(m: Arc<Mpv>, rx: std::sync::mpsc::Receiver<ipc::Event>) {
+    // take over drops once the player window exists
+    let t0 = std::time::Instant::now();
+    let hwnd = loop {
+        if let Some(h) = m.get_prop("window-id").and_then(|s| s.parse::<isize>().ok()) {
+            break h;
+        }
+        if t0.elapsed().as_secs() > 10 {
+            break 0;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    ipc::take_drops(hwnd);
+
+    let mut last_open = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    for ev in rx {
+        match ev {
+            ipc::Event::Open(files) => {
+                // several files opened together from Explorer arrive as separate launches
+                // a moment apart: queue them instead of each replacing the last
+                let together = last_open.elapsed().as_millis() < 800;
+                for (i, f) in files.iter().enumerate() {
+                    let mode = if i == 0 && !together { "replace" } else { "append" };
+                    let _ = m.command(&["loadfile", f, mode]);
+                }
+                if !files.is_empty() {
+                    last_open = std::time::Instant::now();
+                }
+                if hwnd != 0 {
+                    ipc::raise(hwnd);
+                }
+            }
+            ipc::Event::Drop(x, y, files) => {
+                let mut args = vec!["script-message-to".to_string(), "doga".into(), "doga-drop".into(), x.to_string(), y.to_string()];
+                args.extend(files);
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                let _ = m.command(&refs);
+            }
         }
     }
 }
@@ -189,16 +253,24 @@ fn configure(m: &Mpv, ui: &Path, data: &Path) {
     m.opt("autofit-larger", "90%x90%");
     // Open the way it was last left: maximized, or windowed and fitted to the video.
     // (Fullscreen is never restored.) Applied before the window exists, so no jump.
-    let maximized = std::fs::read_to_string(data.join("settings.json"))
-        .map(|s| s.replace(' ', "").contains("\"maximized\":true"))
-        .unwrap_or(false);
-    if maximized {
+    let settings = std::fs::read_to_string(data.join("settings.json")).unwrap_or_default().replace(' ', "");
+    if settings.contains("\"maximized\":true") {
         m.opt("window-maximized", "yes");
+    }
+    // Preferred languages (set from the right-click menu), applied before the first file loads.
+    for (key, opt) in [("alang", "alang"), ("slang", "slang")] {
+        if let Some(v) = json_str_field(&settings, key).filter(|v| v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ',')) {
+            if !v.is_empty() {
+                m.opt(opt, &v);
+            }
+        }
     }
     m.opt("geometry", "50%:50%");
     m.opt("cursor-autohide", "1500");
     // The chrome owns left-drag (seek bar, volume, playlist rows); the title bar moves the window.
     m.opt("window-dragging", "no");
+    // Drops are handled by the host (src/ipc.rs) so the UI knows where they landed.
+    m.opt("drag-and-drop", "no");
     m.opt("title", "${?media-title:${media-title} — }Dōga");
     m.opt("background-color", "#000000");
 
@@ -256,6 +328,9 @@ fn configure(m: &Mpv, ui: &Path, data: &Path) {
     m.opt("input-builtin-bindings", "no");
     m.opt("input-conf", &p(&ui.join("input.conf")));
     m.opt("input-vo-keyboard", "yes");
+    // Media keys and the Windows media overlay (play/pause/next from keyboards & headphones)
+    m.opt("input-media-keys", "yes");
+    m.opt("media-controls", "yes");
     m.opt("scripts", &p(&ui.join("doga.lua")));
     let has_file = std::env::args_os().len() > 1;
     m.opt(
@@ -324,6 +399,14 @@ fn publish_series(m: &Mpv, name: Option<&str>, total: usize, entries: &[(String,
     j += "}}";
     m.set_prop("user-data/doga/series", &j);
     let _ = m.command(&["script-message-to", "doga", "doga-series", &j]);
+}
+
+/// `"key":"value"` from flat JSON written by the UI script (simple values only).
+fn json_str_field(json: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\":\"");
+    let start = json.find(&pat)? + pat.len();
+    let end = json[start..].find('"')? + start;
+    Some(json[start..end].to_string())
 }
 
 fn json_str(s: &str) -> String {

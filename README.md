@@ -28,6 +28,14 @@ A video player for Windows that plays the file exactly as it was made: no colour
 | Z / X | subtitle delay −/+ 50 ms |
 | Ctrl+T | next theme (Nightshade, Glacier, Redline, Carbon) |
 | Esc | close menu / leave fullscreen |
+| Media keys | play/pause, next/previous, stop (keyboards, headphones, the Windows media overlay) |
+
+## Little things that just work
+
+- **One window:** opening a video while Dōga is already open plays it in that window. Several files opened together from Explorer become one playlist.
+- **Preferred languages:** right-click › Audio or Subtitles › "For every file" › "Prefer Japanese" (or whichever language is playing). New files then pick that track automatically. Files you've already watched keep the tracks you chose for them.
+- **Skip opening / ending:** when a file has chapters named like an opening or ending (OP, Opening, Intro, ED, Ending, Credits…), a "Skip" button appears for that chapter. Files without chapters never show it.
+- **Drops:** drop videos on the playlist panel to insert them at that row. Drop them anywhere else to play them, or drop subtitle files to add them to the current video.
 
 ## Install
 
