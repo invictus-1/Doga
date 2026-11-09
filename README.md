@@ -26,6 +26,9 @@ A video player for Windows that plays the file exactly as it was made: no colour
 | I | info (Exact / Passthrough / Tone-mapped) |
 | O | open files |
 | Z / X | subtitle delay −/+ 50 ms |
+| Ctrl+Z / Ctrl+X | audio delay −/+ 50 ms (remembered; for Bluetooth headphones) |
+| Home | back to the start |
+| S / Shift+S | screenshot of the exact frame / with subtitles, PNG in Pictures\Dōga |
 | Ctrl+T | next theme (Nightshade, Glacier, Redline, Carbon) |
 | Ctrl+, | Settings |
 | Esc | close menu / leave fullscreen |
@@ -46,6 +49,9 @@ Everything is saved in `%APPDATA%\Doga\settings.json`.
 
 ## Little things that just work
 
+- **Same monitor:** Dōga opens on the screen it was last on, and so does fullscreen.
+- **Resume:** files pick up where you stopped, with a short "Resumed at 12:34 · Start over" chip. Home goes back to the start.
+- **When something can't play:** a broken or unsupported file gets a plain message saying which file and why, and the playlist carries on.
 - **One window:** opening a video while Dōga is already open plays it in that window. Several files opened together from Explorer become one playlist.
 - **Preferred languages:** right-click › Audio or Subtitles › "For every file" › "Prefer Japanese" (or whichever language is playing). New files then pick that track automatically. Files you've already watched keep the tracks you chose for them.
 - **Skip opening / ending:** when a file has chapters named like an opening or ending (OP, Opening, Intro, ED, Ending, Credits…), a "Skip" button appears for that chapter. Files without chapters never show it.

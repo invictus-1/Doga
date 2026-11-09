@@ -74,6 +74,39 @@ extern "system" {
     fn GetDpiForSystem() -> u32;
 }
 
+#[repr(C)]
+struct MonitorInfoEx {
+    size: u32,
+    monitor: [i32; 4],
+    work: [i32; 4],
+    flags: u32,
+    device: [u16; 32],
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn EnumDisplayMonitors(hdc: *mut c_void, clip: *const c_void, cb: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void, isize) -> i32, data: isize) -> i32;
+    fn GetMonitorInfoW(m: *mut c_void, info: *mut MonitorInfoEx) -> i32;
+}
+
+unsafe extern "system" fn collect_monitor(m: *mut c_void, _: *mut c_void, _: *mut c_void, data: isize) -> i32 {
+    let list = &mut *(data as *mut Vec<String>);
+    let mut info: MonitorInfoEx = std::mem::zeroed();
+    info.size = std::mem::size_of::<MonitorInfoEx>() as u32;
+    if GetMonitorInfoW(m, &mut info) != 0 {
+        let n = info.device.iter().position(|&c| c == 0).unwrap_or(32);
+        list.push(String::from_utf16_lossy(&info.device[..n]));
+    }
+    1
+}
+
+/// Monitors by device name (e.g. "\\.\DISPLAY1"), in the order mpv numbers its screens.
+pub fn monitors() -> Vec<String> {
+    let mut list: Vec<String> = Vec::new();
+    unsafe { EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), collect_monitor, &mut list as *mut Vec<String> as isize) };
+    list
+}
+
 /// Display scale (1.0 at 96 DPI, 1.5 at 144 DPI…).
 pub fn dpi_scale() -> f64 {
     let d = unsafe { GetDpiForSystem() };
@@ -308,7 +341,14 @@ pub fn com_init() {
 }
 
 pub fn desktop_dir() -> Option<PathBuf> {
-    let id = Guid(0xB4BFCC3A, 0xDB2C, 0x424C, [0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41]);
+    known_folder(Guid(0xB4BFCC3A, 0xDB2C, 0x424C, [0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41]))
+}
+
+pub fn pictures_dir() -> Option<PathBuf> {
+    known_folder(Guid(0x33E28130, 0x4E1E, 0x4676, [0x83, 0x5A, 0x98, 0x39, 0x5C, 0x3B, 0xC3, 0xBB]))
+}
+
+fn known_folder(id: Guid) -> Option<PathBuf> {
     let mut p: *mut u16 = std::ptr::null_mut();
     if unsafe { SHGetKnownFolderPath(&id, 0, std::ptr::null_mut(), &mut p) } != 0 || p.is_null() {
         return None;

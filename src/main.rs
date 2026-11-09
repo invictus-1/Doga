@@ -185,6 +185,12 @@ fn run_player() {
                 Some("doga-update-install") => update::spawn_install(mpv.clone()),
                 Some("doga-update-check") => update::spawn_check_now(mpv.clone(), data.clone()),
                 Some("doga-open-data") => sys::shell_open(&data.to_string_lossy()),
+                Some("doga-open-shots") => {
+                    if let Some(dir) = screenshot_dir() {
+                        let _ = std::fs::create_dir_all(&dir);
+                        sys::shell_open(&dir.to_string_lossy());
+                    }
+                }
                 // only Dōga's own pages, never an arbitrary URL from a message
                 Some("doga-open-url") if args.get(1).is_some_and(|u| u.starts_with("https://github.com/invictus-1/Doga")) => {
                     sys::shell_open(&args[1])
@@ -286,6 +292,21 @@ fn configure(m: &Mpv, ui: &Path, data: &Path) {
     if settings.contains("\"maximized\":true") {
         m.opt("window-maximized", "yes");
     }
+    // Open on the monitor it was last on (fullscreen too). mpv on Windows numbers screens in
+    // EnumDisplayMonitors order, so find the saved device's number in that same list.
+    if let Some(d) = json_str_field(&settings, "display").map(|v| v.replace("\\\\", "\\")) {
+        if let Some(i) = sys::monitors().iter().position(|n| n.eq_ignore_ascii_case(&d)) {
+            m.opt("screen", &i.to_string());
+            m.opt("fs-screen", &i.to_string());
+        }
+    }
+    // Screenshots: the exact frame as PNG, into Pictures\Dōga.
+    if let Some(dir) = screenshot_dir() {
+        m.opt("screenshot-directory", &p(&dir));
+    }
+    m.opt("screenshot-format", "png");
+    m.opt("screenshot-template", "%{filename/no-ext} %wH.%wM.%wS");
+    m.opt("screenshot-tag-colorspace", "yes");
     // Settings that must be in place before the first file loads.
     if settings.contains("\"resume\":false") {
         m.opt("resume-playback", "no");
@@ -442,6 +463,10 @@ fn publish_series(m: &Mpv, name: Option<&str>, total: usize, entries: &[(String,
     j += "}}";
     m.set_prop("user-data/doga/series", &j);
     let _ = m.command(&["script-message-to", "doga", "doga-series", &j]);
+}
+
+fn screenshot_dir() -> Option<PathBuf> {
+    sys::pictures_dir().map(|p| p.join("Dōga"))
 }
 
 /// `"key":"value"` from flat JSON written by the UI script (simple values only).

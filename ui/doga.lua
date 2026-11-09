@@ -89,6 +89,8 @@ local cfg = {
   updates = true,         -- quiet daily update check
   volume_mode = 'remember', -- 'remember' | 'reset' (always 100%)
   audio_device = 'auto',
+  audio_delay = 0,        -- seconds; remembered (it's the headphones', not the file's)
+  display = '',           -- monitor the window was last on (applied by the host at launch)
   keys = {},              -- hotkey overrides: action id → key ('' = unassigned)
 }
 
@@ -99,6 +101,7 @@ local function save_settings()
     seek_step = cfg.seek_step, hwdec = cfg.hwdec, sub_scale = cfg.sub_scale, lift_subs = cfg.lift_subs,
     resume = cfg.resume, autoplaylist = cfg.autoplaylist, skip_button = cfg.skip_button, updates = cfg.updates,
     volume_mode = cfg.volume_mode, audio_device = cfg.audio_device, keys = cfg.keys,
+    audio_delay = cfg.audio_delay, display = cfg.display,
   })
 end
 
@@ -301,6 +304,7 @@ end
 local render -- forward
 local open_settings -- forward (Settings page, defined further down)
 local hotkey_label = function(id) return '' end -- forward: current key for an action, as shown to people
+local nudge_audio, delay_text -- forward: audio delay (Settings section)
 local function osd(icon_name, lead, value, meta, opts)
   st.osd = { icon = icon_name, lead = lead, value = value, meta = meta, bar = opts and opts.bar, off = opts and opts.off }
   st.osd_until = mp.get_time() + 1.2
@@ -787,6 +791,58 @@ local function draw_skip(vw, vis)
   zone('skip', x, y, bw, bh, { i = st.chapter })
 end
 
+-- "Resumed at 12:34 · Start over" for a few seconds after a file picks up where it left off.
+local function draw_resumed(vw, vis, now)
+  local rs = st.resumed
+  if not rs or now > rs.until_t or st.idle then return end
+  local s = st.s
+  local lead = 'Resumed at ' .. short_time(rs.pos)
+  local action = 'Start over'
+  local key = hotkey_label('start-over')
+  local bw = text_w(lead, 14 * s) + text_w(action, 14 * s) + (key ~= '' and text_w(key, 12 * s) + 22 * s or 0) + 50 * s
+  local bh = 44 * s
+  local x = 24 * s
+  local y = vis and (st.h - BAR_H * s - 16 * s - bh) or (st.h - 32 * s - bh)
+  local hov = within(x, y, bw, bh)
+  fill(cut(x, y, bw, bh, 8 * s), hov and T.surface2 or T.scrim, hov and 0 or SCRIM_A)
+  stroke(cut(x, y, bw, bh, 8 * s), hov and T.accent or T.lineStrong, 1.5 * s)
+  txt(x + 18 * s, y + bh / 2, lead, { size = 14 })
+  local ax = x + 18 * s + text_w(lead, 14 * s) + 18 * s
+  txt(ax, y + bh / 2, action, { size = 14, weight = 600, color = T.accentBright })
+  if key ~= '' then
+    local kx = ax + text_w(action, 14 * s) + 10 * s
+    local kw = text_w(key, 12 * s) + 12 * s
+    stroke(rect(kx, y + bh / 2 - 10 * s, kw, 20 * s), T.lineStrong, 1 * s)
+    txt(kx + kw / 2, y + bh / 2, key, { size = 11, weight = 600, an = 5, color = T.muted })
+  end
+  zone('start-over', x, y, bw, bh)
+end
+
+-- A file that couldn't be played: say which one and why, in plain words.
+local function friendly_error(err)
+  local e = (err or ''):lower()
+  if e:find('unrecognized') or e:find('format') then return 'This isn\'t a format Dōga can read, or the file is damaged.' end
+  if e:find('loading failed') or e:find('open') then return 'The file couldn\'t be opened. It may be missing, damaged or still downloading.' end
+  if e:find('no audio or video') or e:find('nothing to play') then return 'The file has no video or audio that can be played.' end
+  if e:find('denied') or e:find('permission') then return 'Windows didn\'t allow Dōga to read this file.' end
+  return 'Playback failed (' .. (err ~= '' and err or 'unknown error') .. ').'
+end
+
+local function draw_error_card(x, y, maxw)
+  local er = st.error
+  if not er then return end
+  local s = st.s
+  local title = 'Couldn’t play “' .. er.file .. '”'
+  local w = math.min(maxw, math.max(text_w(title, 15 * s), text_w(er.msg, 13 * s)) + 56 * s)
+  local h = 72 * s
+  fill(cut(x, y, w, h, 8 * s), T.surface1)
+  stroke(cut(x, y, w, h, 8 * s), T.danger, 1.5 * s)
+  fill(diamond(x + 22 * s, y + 26 * s, 5 * s), T.danger)
+  txt(x + 38 * s, y + 26 * s, fit(title, w - 56 * s, 15 * s), { size = 15, weight = 600 })
+  txt(x + 38 * s, y + 50 * s, fit(er.msg, w - 56 * s, 13 * s), { size = 13, color = T.muted })
+  zone('error-card', x, y, w, h)
+end
+
 local function draw_osd(now)
   if not st.osd or now > st.osd_until then return end
   local s, o = st.s, st.osd
@@ -915,6 +971,9 @@ local function draw_idle(vw)
   zone('idle-open', gx, name_y + 80 * u, text_w(instr, isz * s), 28 * u)
   local by = h - 64 * u
 
+  -- the last file couldn't be played
+  if st.error then draw_error_card(42 * u, 28 * u + (st.update and 100 or 46) * u, vw * 0.5) end
+
   -- a newer Dōga is out: one quiet chip, top-left
   if st.update then
     local label = st.update.state == 'downloading' and string.format('Downloading %s… %d%%', st.update.version, st.update.pct or 0)
@@ -1002,6 +1061,12 @@ local function cm_audio()
   for _, t in ipairs(list) do
     it[#it + 1] = radio(track_name(t), t.selected, function() mp.set_property_number('aid', t.id); show_track_osd('audio', t) end, track_meta(t))
   end
+  local d = cfg.audio_delay or 0
+  it[#it + 1] = { sep = true }
+  it[#it + 1] = { header = 'DELAY  ' .. delay_text(d) }
+  it[#it + 1] = { label = 'Earlier by 50 ms', key = hotkey_label('audio-minus'), keep = true, fn = function() nudge_audio(-0.05) end }
+  it[#it + 1] = { label = 'Later by 50 ms', key = hotkey_label('audio-plus'), keep = true, fn = function() nudge_audio(0.05) end }
+  it[#it + 1] = { label = 'Reset delay', keep = true, disabled = math.abs(d) < 0.001, fn = function() nudge_audio(0) end }
   for _, p in ipairs(pref_items('audio')) do it[#it + 1] = p end
   return it
 end
@@ -1219,6 +1284,18 @@ local function apply_cfg()
   mp.set_property('save-position-on-quit', cfg.resume and 'yes' or 'no')
   mp.set_property('resume-playback', cfg.resume and 'yes' or 'no')
   if cfg.audio_device and cfg.audio_device ~= '' then mp.set_property('audio-device', cfg.audio_device) end
+  mp.set_property_number('audio-delay', cfg.audio_delay or 0)
+end
+
+delay_text = function(d)
+  d = d or 0
+  return string.format('%+d ms', math.floor(d * 1000 + (d >= 0 and 0.5 or -0.5)))
+end
+nudge_audio = function(delta)
+  cfg.audio_delay = (delta == 0) and 0 or math.floor(((cfg.audio_delay or 0) + delta) * 1000 + 0.5) / 1000
+  mp.set_property_number('audio-delay', cfg.audio_delay)
+  save_settings()
+  osd('audio', 'Audio delay', delay_text(cfg.audio_delay), cfg.audio_delay == 0 and 'in sync with the video' or (cfg.audio_delay > 0 and 'sound later' or 'sound earlier'))
 end
 
 -- Every remappable action, with its default key (from ui/input.conf) and what it runs.
@@ -1241,6 +1318,11 @@ local HOTKEYS = {
   { id = 'open', label = 'Open file', key = 'o', cmd = 'script-binding doga/open' },
   { id = 'sub-minus', label = 'Subtitles earlier', key = 'z', cmd = 'script-binding doga/sub-delay-minus' },
   { id = 'sub-plus', label = 'Subtitles later', key = 'x', cmd = 'script-binding doga/sub-delay-plus' },
+  { id = 'audio-minus', label = 'Audio earlier', key = 'Ctrl+z', cmd = 'script-binding doga/audio-delay-minus' },
+  { id = 'audio-plus', label = 'Audio later', key = 'Ctrl+x', cmd = 'script-binding doga/audio-delay-plus' },
+  { id = 'start-over', label = 'Back to the start', key = 'HOME', cmd = 'script-binding doga/start-over' },
+  { id = 'shot', label = 'Screenshot (picture only)', key = 's', cmd = 'script-binding doga/screenshot' },
+  { id = 'shot-subs', label = 'Screenshot with subtitles', key = 'S', cmd = 'script-binding doga/screenshot-subs' },
   { id = 'frame-back', label = 'Previous frame', key = ',', cmd = 'no-osd frame-back-step' },
   { id = 'frame-fwd', label = 'Next frame', key = '.', cmd = 'no-osd frame-step' },
   { id = 'theme', label = 'Next theme', key = 'Ctrl+t', cmd = 'script-binding doga/cycle-theme' },
@@ -1437,7 +1519,9 @@ local function section_rows(name)
     rows[#rows + 1] = row('Resume where you stopped', 'Reopening a file continues from the same moment, with the same tracks', onoff('resume'))
     rows[#rows + 1] = row('Build the playlist from the folder', 'Opening one episode lines up the rest of its series', onoff('autoplaylist'))
     rows[#rows + 1] = row('“Skip opening / ending” button', 'Shown while a chapter is an opening or ending', onoff('skip_button'))
-    rows[#rows + 1] = row('Window', 'Opens the way you left it: maximized, or fitted to the video. Fullscreen is always manual.', nil)
+    rows[#rows + 1] = row('Window', 'Opens where and how you left it: on the same monitor, maximized or fitted to the video. Fullscreen is always manual.', nil)
+    rows[#rows + 1] = row('Screenshots', hotkey_label('shot') .. ' saves the exact frame · ' .. hotkey_label('shot-subs') .. ' includes subtitles · Pictures › Dōga',
+      function(rx, y, clip) sbutton(clip, 'set-open-shots', rx, y, 'Open folder') end, 64, 150)
   elseif name == 'Playback' then
     rows[#rows + 1] = row('Seek step', 'How far ← and → jump', function(rx, y, clip)
       seg(clip, 'seek_step', rx, y, { { '3s', 3 }, { '5s', 5 }, { '10s', 10 }, { '15s', 15 }, { '30s', 30 } }, cfg.seek_step)
@@ -1453,7 +1537,14 @@ local function section_rows(name)
   elseif name == 'Audio' then
     rows[#rows + 1] = row('Volume on launch', 'Remember your last volume, or always start at 100%', function(rx, y, clip)
       seg(clip, 'volume_mode', rx, y, { { 'Remember', 'remember' }, { 'Always 100%', 'reset' } }, cfg.volume_mode)
-    end)
+    end, 64, 320)
+    rows[#rows + 1] = row('Audio delay  ' .. delay_text(cfg.audio_delay),
+      'For Bluetooth headphones or out-of-sync files · ' .. hotkey_label('audio-minus') .. ' / ' .. hotkey_label('audio-plus'),
+      function(rx, y, clip)
+        local w1 = sbutton(clip, 'set-adelay', rx, y, 'Reset', { d = 0 })
+        local w2 = sbutton(clip, 'set-adelay', rx - w1 - 8 * s, y, '+50 ms', { d = 0.05 })
+        sbutton(clip, 'set-adelay', rx - w1 - w2 - 16 * s, y, '−50 ms', { d = -0.05 })
+      end, 64, 300)
     rows[#rows + 1] = { h = 40, draw = function(x, y, w, clip)
       txt(x, y + 26 * s, 'OUTPUT DEVICE', { size = 10, weight = 600, color = T.muted, extra = '\\fsp1.5' .. clip })
     end }
@@ -1597,6 +1688,8 @@ local SET_ACT = {
     apply_cfg(); save_settings()
   end,
   ['set-device'] = function(z) cfg.audio_device = z.data.name; apply_cfg(); save_settings() end,
+  ['set-adelay'] = function(z) nudge_audio(z.data.d) end,
+  ['set-open-shots'] = function() mp.commandv('script-message-to', 'main', 'doga-open-shots') end,
   ['set-clear-lang'] = function(z)
     local key = z.data.kind == 'audio' and 'alang' or 'slang'
     st[key] = nil; mp.set_property(key, ''); save_settings()
@@ -1651,6 +1744,7 @@ render = function()
     end
     if st.info then draw_info(vw) end
     draw_skip(vw, vis)
+    draw_resumed(vw, vis, now)
   end
   if st.panel then draw_panel() end
   draw_osd(now)
@@ -1683,6 +1777,7 @@ end
 mp.add_periodic_timer(0.25, function()
   local now = mp.get_time()
   local vis = controls_visible(now)
+  if st.resumed and now > st.resumed.until_t then st.resumed = nil; render() end
   if vis ~= was_visible or (st.osd and now > st.osd_until and now < st.osd_until + 0.3) then render() end
 end)
 
@@ -1754,6 +1849,8 @@ local ACTIONS = {
   end,
   recent = function(z) mp.commandv('loadfile', z.data.path, 'replace') end,
   update = function() start_update() end,
+  ['start-over'] = function() st.resumed = nil; mp.commandv('seek', 0, 'absolute') end,
+  ['error-card'] = function() st.error = nil end,
   skip = function(z)
     local nxt = st.chapters[z.data.i + 2]
     if nxt then
@@ -1932,6 +2029,25 @@ end)
 mp.add_key_binding(nil, 'settings', function()
   if st.settings then close_settings() else open_settings() end
 end)
+mp.add_key_binding(nil, 'audio-delay-minus', function() nudge_audio(-0.05) end, { repeatable = true })
+mp.add_key_binding(nil, 'audio-delay-plus', function() nudge_audio(0.05) end, { repeatable = true })
+mp.add_key_binding(nil, 'start-over', function()
+  if st.idle then return end
+  st.resumed = nil
+  mp.commandv('seek', 0, 'absolute')
+  osd('back', 'Back to the start', nil)
+end)
+-- Screenshots: the exact decoded frame (no controls; subtitles only with Shift), PNG,
+-- into Pictures\Dōga (set by the host).
+local function screenshot(mode)
+  if st.idle then return end
+  local r = mp.command_native({ 'screenshot', mode })
+  local name = type(r) == 'table' and r.filename and basename(r.filename)
+  if name then osd('open', 'Screenshot', name, 'Pictures › Dōga')
+  else osd('open', 'Screenshot', 'couldn\'t be saved', nil, { off = true }) end
+end
+mp.add_key_binding(nil, 'screenshot', function() screenshot('video') end)
+mp.add_key_binding(nil, 'screenshot-subs', function() screenshot('subtitles') end)
 mp.add_key_binding(nil, 'seek-back', function() mp.commandv('no-osd', 'seek', -cfg.seek_step) end, { repeatable = true })
 mp.add_key_binding(nil, 'seek-fwd', function() mp.commandv('no-osd', 'seek', cfg.seek_step) end, { repeatable = true })
 mp.add_key_binding(nil, 'context-menu', function()
@@ -2050,6 +2166,48 @@ local function boot_intro()
   end
 end
 mp.register_event('file-loaded', boot_intro)
+
+-- Resume chip: the first playback-restart after a load tells us where playback began.
+local check_resume = false
+mp.register_event('file-loaded', function()
+  st.error = nil
+  check_resume = true
+end)
+mp.register_event('playback-restart', function()
+  if not check_resume then return end
+  check_resume = false
+  local p = mp.get_property_number('time-pos') or 0
+  if cfg.resume and p > 5 then
+    st.resumed = { pos = p, until_t = mp.get_time() + 6 }
+    st.last_move = mp.get_time()
+    render()
+  end
+end)
+
+-- A file that failed: remember which and why (the playlist carries on by itself).
+mp.register_event('end-file', function(e)
+  if e.reason ~= 'error' then return end
+  local name
+  for _, it in ipairs(st.playlist) do
+    if it.id == e.playlist_entry_id then name = basename(it.filename) end
+  end
+  st.error = { file = name or 'this file', msg = friendly_error(e.file_error) }
+  msg.info('could not play', st.error.file, '-', e.file_error or '', '->', st.error.msg)
+  osd('info', 'Couldn’t play', st.error.file, nil, { off = true })
+  render()
+end)
+
+-- Remember the monitor (debounced; the host opens the next window there).
+local display_timer
+mp.observe_property('display-names', 'native', function(_, v)
+  local d = type(v) == 'table' and v[1] or nil
+  if not d or d == '' then return end
+  if display_timer then display_timer:kill() end
+  display_timer = mp.add_timeout(1.0, function()
+    display_timer = nil
+    if d ~= cfg.display then cfg.display = d; save_settings() end
+  end)
+end)
 mp.register_script_message('doga-demo-idle', function(v)
   st.demo_idle = v == 'on'
   intro.idle_t0 = nil
