@@ -91,6 +91,7 @@ Each theme also has its own start-screen cover, shown above. The installer and u
 - **Same monitor:** Dōga opens on the screen it was last on, and so does fullscreen.
 - **Resume:** files pick up where you stopped, with a short "Resumed at 12:34 · Start over" chip. Home goes back to the start.
 - **Continue:** the start screen's first row is the file you stopped in, or, when you finished it, the next episode you haven't watched. One click and you're back in.
+- **A clean start screen when you want one:** "Clear" beside the list empties Continue and Recent, and Settings › General › Recent files turns the list off for good (it is on by default). Clear only shows while there is something to clear. Watched marks and resume positions are kept either way.
 - **Same tracks for a whole series:** pick the dub, or the "Signs & Songs" subtitles, or subtitles off, in one episode and the rest of the series opens the same way. The pick is matched by language and track name, so it still lands on the right track when an episode orders its tracks differently. It only ever applies to that series. Settings › Playback turns it off.
 - **Watched marks:** the playlist shows a tick on episodes you finished and a thin line for how far you got in the ones you started.
 - **The playlist follows along:** the panel opens with the playing episode in the middle and scrolls to keep it in view as the series goes on. Scrolling by hand is left alone until the next episode starts.

@@ -103,6 +103,7 @@ local cfg = {
   display = '',           -- monitor the window was last on (applied by the host at launch)
   series_tracks = true,   -- the audio and subtitles picked in one episode follow to the rest
   ontop = false,          -- keep the window above other windows
+  recents = true,         -- list Continue and Recent on the start screen
   keys = {},              -- hotkey overrides: action id → key ('' = unassigned)
 }
 
@@ -114,7 +115,7 @@ local function save_settings()
     resume = cfg.resume, autoplaylist = cfg.autoplaylist, skip_button = cfg.skip_button, updates = cfg.updates,
     volume_mode = cfg.volume_mode, audio_device = cfg.audio_device, keys = cfg.keys,
     audio_delay = cfg.audio_delay, display = cfg.display,
-    series_tracks = cfg.series_tracks, ontop = cfg.ontop,
+    series_tracks = cfg.series_tracks, ontop = cfg.ontop, recents = cfg.recents,
   })
 end
 
@@ -1216,8 +1217,8 @@ local function draw_idle(vw)
 
   -- Continue (one row: the file you stopped in, or the next episode of the series you
   -- finished one of) above Recent. The Continue row is never repeated under Recent.
-  local cont = st.cont
-  if cont or #recent > 0 then
+  local cont = cfg.recents and st.cont or nil
+  if cfg.recents and (cont or #recent > 0) then
     -- scales with the window like the rest, but never smaller than normal UI text
     local k = math.max(s, u)
     local f = k / s -- font multiplier (txt sizes are css px × s)
@@ -1227,7 +1228,7 @@ local function draw_idle(vw)
     local rx = split and (vw / 2) or gx
     local rows = {}
     for _, rr in ipairs(recent) do
-      if #rows >= (cont and 4 or 5) then break end
+      if rr.hide or #rows >= (cont and 4 or 5) then break end -- cleared entries: see clear_recent
       if not (cont and rr.path == cont.path) then rows[#rows + 1] = rr end
     end
     local n = #rows
@@ -1240,8 +1241,16 @@ local function draw_idle(vw)
       local a2 = 255 - K.span(t, 0.95, 1.3) * 255
       local y = top_of() + (1 - K.out_cubic(K.span(t, 0.95, 1.3))) * 8 * k
       local rw = vw - rx - 32 * k
+      local clear_done = false
       local function head(label)
         txt(rx + 12 * k, y - 14 * k, label, { size = 11 * f, weight = 600, color = T.muted, extra = '\\fsp1.5', alpha = a2 })
+        if clear_done then return end
+        clear_done = true -- once, beside the first header; it goes away with the list
+        local cw, chh = text_w('CLEAR', 11 * k) + 32 * k, 24 * k
+        local cx, cy = rx + rw - cw, y - 14 * k - chh / 2
+        txt(rx + rw - 12 * k, y - 14 * k, 'CLEAR', { size = 11 * f, weight = 600, an = 6,
+          color = within(cx, cy, cw, chh) and T.ink or T.muted, extra = '\\fsp1.5', alpha = a2 })
+        zone('recent-clear', cx, cy, cw, chh)
       end
       local function line(icon_name, color, title, meta, path)
         if within(rx, y, rw, rh) then fill(rect(rx, y, rw, rh), T.surface2) end
@@ -1810,6 +1819,11 @@ local function section_rows(name)
     rows[#rows + 1] = row('Resume where you stopped', 'Reopening a file continues from the same moment, with the same tracks', onoff('resume'))
     rows[#rows + 1] = row('Build the playlist from the folder', 'Opening one episode lines up the rest of its series', onoff('autoplaylist'))
     rows[#rows + 1] = row('“Skip opening / ending” button', 'Shown while a chapter is an opening or ending', onoff('skip_button'))
+    rows[#rows + 1] = row('Recent files', 'Continue and Recent on the start screen', onoff('recents'))
+    if recent[1] and not recent[1].hide then -- nothing to clear: no row
+      rows[#rows + 1] = row('Clear recent files', 'Empties the start screen · watched marks and resume positions stay',
+        function(rx, y, clip) sbutton(clip, 'set-clear-recent', rx, y, 'Clear') end, 64, 110)
+    end
     rows[#rows + 1] = row('Window', 'Opens where and how you left it: on the same monitor, maximized or fitted to the video. Fullscreen is always manual.', nil)
     rows[#rows + 1] = row('Always on top', 'Keeps Dōga above other windows · ' .. hotkey_label('ontop'), onoff('ontop'))
     rows[#rows + 1] = row('Screenshots', hotkey_label('shot') .. ' saves the exact frame · ' .. hotkey_label('shot-subs') .. ' includes subtitles · Pictures › Dōga',
@@ -1986,6 +2000,7 @@ local SET_ACT = {
   ['set-device'] = function(z) cfg.audio_device = z.data.name; apply_cfg(); save_settings() end,
   ['set-adelay'] = function(z) nudge_audio(z.data.d) end,
   ['set-open-shots'] = function() mp.commandv('script-message-to', 'main', 'doga-open-shots') end,
+  ['set-clear-recent'] = function() st.clear_recent() end,
   ['set-clear-lang'] = function(z)
     local key = z.data.kind == 'audio' and 'alang' or 'slang'
     st[key] = nil; mp.set_property(key, ''); save_settings()
@@ -2091,18 +2106,30 @@ local function remember()
   local g = st.last_good
   if not g or not g.path or not g.dur or g.dur <= 0 then return end
   local entry = { path = g.path, pos = g.pos, dur = g.dur, watched = g.pos / g.dur > 0.92 }
+  if g.path == st.hide_path then entry.hide = true end
   for i = #recent, 1, -1 do if recent[i].path == g.path then table.remove(recent, i) end end
   table.insert(recent, 1, entry)
   while #recent > 200 do table.remove(recent) end -- the start screen lists five; the rest feed the watched marks
   write_json(recent_path, recent)
 end
 
+-- Clear: the start screen's list is emptied. The entries stay, flagged, because they also hold
+-- the watched marks of the playlist; a file opened again is listed again. Every clear flags the
+-- whole list and new entries go in front, so "anything to clear" is just the first entry.
+function st.clear_recent()
+  for _, e in ipairs(recent) do e.hide = true end
+  st.cont = nil
+  st.hide_path = st.last_good and st.last_good.path -- the file open (or just closed) stays out too
+  write_json(recent_path, recent)
+end
+mp.register_event('file-loaded', function() st.hide_path = nil end)
+
 -- The start screen's Continue row. Stopped partway: that file. Finished it: the host looks
 -- up what follows it in its series (answer in doga-next) and the first one not yet watched is offered.
 local function refresh_continue()
   st.cont = nil
   local r0 = recent[1]
-  if not r0 or not r0.path then return end
+  if not r0 or not r0.path or r0.hide then return end
   if not r0.watched then
     if (r0.pos or 0) > 5 then st.cont = { path = r0.path, pos = r0.pos, dur = r0.dur } end
     return
@@ -2112,7 +2139,7 @@ end
 mp.register_script_message('doga-next', function(j)
   local d = j and utils.parse_json(j)
   local r0 = recent[1]
-  if type(d) ~= 'table' or not r0 or not r0.watched or d['for'] ~= r0.path then return end
+  if type(d) ~= 'table' or not r0 or not r0.watched or r0.hide or d['for'] ~= r0.path then return end
   for _, e in ipairs(d.next or {}) do
     local rec = recent_for(e[1])
     if not (rec and rec.watched) then
@@ -2177,6 +2204,7 @@ local ACTIONS = {
     end
   end,
   recent = function(z) mp.commandv('loadfile', z.data.path, 'replace') end,
+  ['recent-clear'] = function() st.clear_recent() end,
   update = function() start_update() end,
   ['start-over'] = function() st.resumed = nil; mp.commandv('seek', 0, 'absolute') end,
   ['error-card'] = function() st.error = nil end,
