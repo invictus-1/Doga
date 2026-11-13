@@ -983,9 +983,12 @@ local function draw_panel()
   end
 end
 
--- Skip button: shown while the current chapter is an opening or ending (by its title).
+-- Skip button: offered when a chapter that is an opening or ending (by its title) starts. A bar
+-- along its bottom fills for SKIP_KINDS.show seconds, then the button leaves the picture; for
+-- the rest of that chapter it only comes back together with the controls.
 -- Files without chapters never show it.
 local SKIP_KINDS = {
+  show = 8,
   { label = 'Skip opening', pats = { '^op$', '^op[%s%d%-_:]', '^opening', '^intro', '^avant', 'opening$', 'オープニング' } },
   { label = 'Skip ending', pats = { '^ed$', '^ed[%s%d%-_:]', '^ending', '^outro', '^credits', 'ending$', 'エンディング' } },
 }
@@ -996,11 +999,25 @@ local function skip_label(title)
   end
 end
 
-local function draw_skip(vw, vis)
-  if not cfg.skip_button or st.idle or st.dur <= 0 or not st.chapter or st.chapter < 0 then return end
-  local c = st.chapters[st.chapter + 1]
+local function draw_skip(vw, vis, now)
+  local c = cfg.skip_button and not st.idle and st.dur > 0 and st.chapter and st.chapter >= 0 and st.chapters[st.chapter + 1]
   local label = c and skip_label(c.title)
-  if not label then return end
+  if not label then st.skip_key = nil; return end
+  -- the countdown starts when the chapter does (again if it is entered again)
+  local key = (st.path or '') .. '#' .. st.chapter
+  if key ~= st.skip_key then
+    st.skip_key, st.skip_t0 = key, now
+    if not st.skip_timer then -- redraws while the bar fills, and once more to take the button away
+      st.skip_timer = mp.add_periodic_timer(1 / 30, function()
+        if not st.skip_key or mp.get_time() - st.skip_t0 > SKIP_KINDS.show + 0.1 then
+          st.skip_timer:kill(); st.skip_timer = nil
+        end
+        render()
+      end)
+    end
+  end
+  local p = (now - st.skip_t0) / SKIP_KINDS.show
+  if p >= 1 and not vis then return end
   local s = st.s
   local bw, bh = text_w(label, 14 * s) + 66 * s, 44 * s
   local x = vw - 24 * s - bw
@@ -1010,8 +1027,12 @@ local function draw_skip(vw, vis)
     fill(cut(x, y, bw, bh, 8 * s), T.accent)
   else
     fill(cut(x, y, bw, bh, 8 * s), T.scrim, SCRIM_A)
-    stroke(cut(x, y, bw, bh, 8 * s), T.accent, 1.5 * s)
   end
+  if p < 1 then -- the button's own shape, cut down to a strip that grows from the left
+    fill(cut(x, y, bw, bh, 8 * s), hov and T.onAccent or T.accent, nil,
+      string.format('\\clip(%d,%d,%d,%d)', r(x), r(y + bh - 4 * s), r(x + bw * p), r(y + bh)))
+  end
+  if not hov then stroke(cut(x, y, bw, bh, 8 * s), T.accent, 1.5 * s) end
   txt(x + 20 * s, y + bh / 2, label, { size = 14, weight = 600, color = hov and T.onAccent or T.ink })
   icon('chev', x + bw - 36 * s, y + bh / 2 - 9 * s, 18 * s, hov and T.onAccent or T.accent)
   zone('skip', x, y, bw, bh, { i = st.chapter })
@@ -1818,7 +1839,7 @@ local function section_rows(name)
     end }
     rows[#rows + 1] = row('Resume where you stopped', 'Reopening a file continues from the same moment, with the same tracks', onoff('resume'))
     rows[#rows + 1] = row('Build the playlist from the folder', 'Opening one episode lines up the rest of its series', onoff('autoplaylist'))
-    rows[#rows + 1] = row('“Skip opening / ending” button', 'Shown while a chapter is an opening or ending', onoff('skip_button'))
+    rows[#rows + 1] = row('“Skip opening / ending” button', 'Shown briefly when an opening or ending starts', onoff('skip_button'))
     rows[#rows + 1] = row('Recent files', 'Continue and Recent on the start screen', onoff('recents'))
     if recent[1] and not recent[1].hide then -- nothing to clear: no row
       rows[#rows + 1] = row('Clear recent files', 'Empties the start screen · watched marks and resume positions stay',
@@ -2056,7 +2077,7 @@ render = function()
       if st.menu then draw_menu(vw) end
     end
     if st.info then draw_info(vw) end
-    draw_skip(vw, vis)
+    draw_skip(vw, vis, now)
     draw_resumed(vw, vis, now)
   end
   if st.panel then draw_panel() end

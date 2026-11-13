@@ -16,7 +16,7 @@ Hovering the seek bar shows the frame, chapter and time at that spot. The badge 
 
 ![Glacier theme: a thumbnail preview above the seek bar, and the info badge reading Exact](docs/screenshots/seek.png)
 
-Right-click for everything else: tracks, subtitle delay, speed, theme. The "Skip opening" button appears only while an opening chapter plays.
+Right-click for everything else: tracks, subtitle delay, speed, theme. The "Skip opening" button appears when an opening chapter starts.
 
 ![Carbon theme: the right-click menu with the Subtitles submenu open, and the Skip opening button](docs/screenshots/menu.png)
 
@@ -98,7 +98,7 @@ Each theme also has its own start-screen cover, shown above. The installer and u
 - **When something can't play:** a broken or unsupported file gets a plain message saying which file and why, and the playlist carries on.
 - **One window:** opening a video while Dōga is already open plays it in that window. Several files opened together from Explorer become one playlist.
 - **Preferred languages:** right-click › Audio or Subtitles › "For every file" › "Prefer Japanese" (or whichever language is playing). New files then pick that track automatically. Files you've already watched keep the tracks you chose for them.
-- **Skip opening / ending:** when a file has chapters named like an opening or ending (OP, Opening, Intro, ED, Ending, Credits…), a "Skip" button appears for that chapter. Files without chapters never show it.
+- **Skip opening / ending:** when a file has chapters named like an opening or ending (OP, Opening, Intro, ED, Ending, Credits…), a "Skip" button appears when that chapter starts. A bar along its bottom fills for 8 seconds, then the button leaves the picture; for the rest of that chapter it comes back whenever the controls are showing. Files without chapters never show it.
 - **Drops:** drop videos on the playlist panel to insert them at that row. Drop them anywhere else to play them, or drop subtitle files to add them to the current video.
 
 ## Install
