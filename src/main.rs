@@ -368,12 +368,12 @@ fn configure(m: &Mpv, ui: &Path, data: &Path, portable: bool) {
     if settings.contains("\"maximized\":true") {
         m.opt("window-maximized", "yes");
     }
-    // Open on the monitor it was last on (fullscreen too). mpv on Windows numbers screens in
-    // EnumDisplayMonitors order, so find the saved device's number in that same list.
+    // Open on the monitor it was last on. mpv on Windows numbers screens in EnumDisplayMonitors
+    // order, so find the saved device's number in that same list. `fs-screen` stays at its
+    // default: fullscreen then covers whichever monitor the window is on, also after a drag.
     if let Some(d) = json_str_field(&settings, "display").map(|v| v.replace("\\\\", "\\")) {
         if let Some(i) = sys::monitors().iter().position(|n| n.eq_ignore_ascii_case(&d)) {
             m.opt("screen", &i.to_string());
-            m.opt("fs-screen", &i.to_string());
         }
     }
     // Screenshots: the exact frame as PNG, into Pictures\Dōga.

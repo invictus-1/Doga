@@ -88,7 +88,7 @@ Each theme also has its own start-screen cover, shown above. The installer and u
 
 ## Little things that just work
 
-- **Same monitor:** Dōga opens on the screen it was last on, and so does fullscreen.
+- **Same monitor:** Dōga opens on the screen it was last on. Fullscreen covers the screen the window is on, so drag it to another monitor and it goes fullscreen there.
 - **Resume:** files pick up where you stopped, with a short "Resumed at 12:34 · Start over" chip. Home goes back to the start.
 - **Continue:** the start screen's first row is the file you stopped in, or, when you finished it, the next episode you haven't watched. One click and you're back in.
 - **A clean start screen when you want one:** "Clear" beside the list empties Continue and Recent, and Settings › General › Recent files turns the list off for good (it is on by default). Clear only shows while there is something to clear. Watched marks and resume positions are kept either way.
