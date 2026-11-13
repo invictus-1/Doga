@@ -887,7 +887,7 @@ local function draw_panel()
   fill(rect(x0, fy, pw, 1 * s), T.line)
   local n = #st.playlist
   local line1, line2
-  if st.series and st.series.name and st.series.matched and st.series.matched > 1 then
+  if st.series and st.series.name and st.series.matched and st.series.matched > 1 and st.series.matched == n then
     line1 = string.format('Auto · %d of %d videos in this folder', st.series.matched, st.series.total or st.series.matched)
     line2 = 'Series: ' .. st.series.name
   else
@@ -926,7 +926,9 @@ local function draw_panel()
     if y + rh > ly and y < ly + lh then
       local title, token = entry_info(e)
       local cur = e.current or e.playing
-      local hov = within(x0, math.max(y, ly), pw, rh) and not drag
+      local hov
+      if st.cm then hov = st.cm.row_id == e.id -- a menu is open: only its own entry is marked
+      else hov = within(x0, math.max(y, ly), pw, rh) and not drag end
       if drag and drag.from == i then
         -- leave a gap where the dragged row was
         fill(rect(x0 + 1 * s, y, pw - 1 * s, rh), T.surface0, 0, clip)
@@ -2442,8 +2444,31 @@ mp.add_key_binding(nil, 'seek-fwd', function() mp.commandv('no-osd', 'seek', cfg
 mp.add_key_binding(nil, 'context-menu', function()
   if st.settings then return end
   skip_intro()
-  st.menu = nil
-  st.cm = { x = st.mx, y = st.my, items = cm_main() }
+  st.menu, st.cm = nil, nil
+  render() -- zones as they are without a menu, to see what is under the pointer
+  local z = hit()
+  local e = z and z.id == 'pl-row' and st.playlist[z.data.i]
+  if e then
+    -- on a playlist entry: that entry's own menu. It is found again by id when clicked, in case
+    -- the list changed while the menu was open. Only the list changes; the file is left alone.
+    local id = e.id
+    st.cm = { x = st.mx, y = st.my, row_id = id, items = {
+      { label = 'Remove from playlist', fn = function()
+        local at, newest = nil, 0
+        for i, it in ipairs(st.playlist) do
+          if it.id == id then at = i end
+          newest = math.max(newest, it.id or 0)
+        end
+        if not at then return end
+        -- tells the host this list was trimmed by hand, so it isn't filled from the folder again
+        -- if a single entry is left (see fill_playlist)
+        mp.set_property('user-data/doga/trimmed', tostring(newest))
+        mp.commandv('playlist-remove', at - 1)
+      end },
+    } }
+  else
+    st.cm = { x = st.mx, y = st.my, items = cm_main() }
+  end
   render()
 end)
 mp.add_key_binding(nil, 'escape', function()

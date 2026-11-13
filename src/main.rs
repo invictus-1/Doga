@@ -503,6 +503,16 @@ fn fill_playlist(m: &Mpv, data: &Path) {
     if count != 1 || !file.is_file() {
         return;
     }
+    // A list the user trimmed down to one entry (playlist panel › Remove from playlist) stays as
+    // it is. The UI notes the newest entry id at the time of a removal; only a file opened
+    // afresh, which gets a newer id, is filled in again.
+    // (user-data comes back as JSON, so the UI's string arrives in quotes)
+    let num = |name: &str| m.get_prop(name).and_then(|s| s.trim_matches('"').parse::<f64>().ok());
+    let trimmed = num("user-data/doga/trimmed").unwrap_or(-1.0);
+    let id = num("playlist/0/id").unwrap_or(f64::MAX);
+    if id <= trimmed {
+        return;
+    }
     let Some(s) = series::detect(file) else {
         // no series: the folder is only counted for the playlist's footer
         let dir_total = file
