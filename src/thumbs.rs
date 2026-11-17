@@ -59,7 +59,7 @@ struct Engine {
     size: (u32, u32),
 }
 
-fn start_engine(dll: &PathBuf) -> Option<Mpv> {
+pub(crate) fn start_engine(dll: &PathBuf) -> Option<Mpv> {
     let m = Mpv::load(dll).ok()?;
     for (k, v) in [
         ("config", "no"),
@@ -103,7 +103,7 @@ fn start_engine(dll: &PathBuf) -> Option<Mpv> {
 }
 
 /// Wait for one of `want` events, up to `timeout`.
-fn wait_for(m: &Mpv, timeout: Duration, mut want: impl FnMut(&Ev) -> Option<bool>) -> bool {
+pub(crate) fn wait_for(m: &Mpv, timeout: Duration, mut want: impl FnMut(&Ev) -> Option<bool>) -> bool {
     let t0 = Instant::now();
     while t0.elapsed() < timeout {
         let ev = m.wait(0.1);
@@ -157,6 +157,12 @@ fn run(main: Arc<Mpv>, dll: PathBuf, rx: Receiver<Req>) {
         }
         let e = eng.as_mut().unwrap();
         if e.path != job.path {
+            if e.ok {
+                // Close the previous file and take its end-of-file event here; otherwise the wait
+                // below reads it as the new file failing, and the next episode had no previews.
+                let _ = e.mpv.command(&["stop"]);
+                wait_for(&e.mpv, Duration::from_secs(2), |ev| matches!(ev, Ev::EndFile).then_some(true));
+            }
             e.path = job.path.clone();
             graveyard.push_back(std::mem::take(&mut cache));
             if graveyard.len() > 2 {

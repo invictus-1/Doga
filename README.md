@@ -58,7 +58,7 @@ The video in these pictures is a set of test clips drawn for this page.
 
 Open with right-click › Settings… or **Ctrl+,**. The video keeps playing dimmed behind it.
 
-- **General:** theme; resume where you stopped; build the playlist from the folder; the Skip opening/ending button.
+- **General:** theme; resume where you stopped; build the playlist from the folder; the Skip opening/ending button; recent files on the start screen; whether Clear in Continue watching keeps a backup.
 - **Playback:** seek step for ← → (3–30 s); hardware decoding (the picture is identical either way); your preferred audio and subtitle languages, with Clear.
 - **Subtitles:** size (80–130%); whether dialogue moves above the controls.
 - **Audio:** volume on launch (remember or always 100%); output device.
@@ -95,6 +95,7 @@ Each theme also has its own start-screen cover, shown above. The installer and u
 - **Same tracks for a whole series:** pick the dub, or the "Signs & Songs" subtitles, or subtitles off, in one episode and the rest of the series opens the same way. The pick is matched by language and track name, so it still lands on the right track when an episode orders its tracks differently. It only ever applies to that series. Settings › Playback turns it off.
 - **Watched marks:** the playlist shows a tick on episodes you finished and a thin line for how far you got in the ones you started.
 - **The playlist follows along:** the panel opens with the playing episode in the middle and scrolls to keep it in view as the series goes on. Scrolling by hand is left alone until the next episode starts.
+- **Continue watching:** the playlist panel has a second tab, Continue watching, with every video you stopped partway: a frame from where you left off, how far you got and how much is left. Click one to pick up there. Sort by last watched, name or time left. **Clear** empties it after asking first, and keeps a copy you can bring back from **Previous** (the ten newest copies are kept). Settings › General › Back up Continue watching before Clear turns the copy off (it is on by default); Clear is then for good. Resume positions and watched marks stay either way, and a video you open again is listed again.
 - **Remove from the playlist:** right-click an entry in the playlist panel and choose "Remove from playlist", for example an episode you've finished. Only the list changes; the file stays where it is. If it was the one playing, the next one starts. Opening the series again lists it again.
 - **When something can't play:** a broken or unsupported file gets a plain message saying which file and why, and the playlist carries on.
 - **One window:** opening a video while Dōga is already open plays it in that window. Several files opened together from Explorer become one playlist.
@@ -160,7 +161,7 @@ cargo run -- "D:\Anime\Show - 01.mkv"
 
 Every push and pull request is built and tested by GitHub Actions (`.github/workflows/ci.yml`: `cargo build`, then `cargo test`, on Windows).
 
-Settings, resume positions, recent files and the tracks picked per series (`series.json`) are stored in `%APPDATA%\Doga`, or in `data\` beside `doga.exe` when a `portable.txt` sits there. A `cache` folder beside them holds compiled shaders, which is why the second launch onward opens faster; deleting it is harmless. The window opens the way you last left it: maximized, or windowed and fitted to the video. Fullscreen is always manual.
+Settings, resume positions, recent files, the tracks picked per series (`series.json`) and the Continue watching backups (`continue-backups.json`) are stored in `%APPDATA%\Doga`, or in `data\` beside `doga.exe` when a `portable.txt` sits there. A `cache` folder beside them holds compiled shaders, which is why the second launch onward opens faster; deleting it is harmless. The window opens the way you last left it: maximized, or windowed and fitted to the video. Fullscreen is always manual.
 
 ## Series detection
 

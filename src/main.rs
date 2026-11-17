@@ -6,6 +6,7 @@
 mod ipc;
 mod mpv;
 mod pack;
+mod posters;
 mod series;
 mod setup;
 mod splash;
@@ -183,6 +184,7 @@ fn run_player() {
     step("engine initialized");
     let mpv = Arc::new(mpv);
     let thumbs = thumbs::spawn(mpv.clone(), dll.clone());
+    let posters = posters::spawn(mpv.clone(), dll.clone());
 
     for (i, f) in args.iter().enumerate() {
         let _ = mpv.command(&["loadfile", f, if i == 0 { "replace" } else { "append" }]);
@@ -231,6 +233,11 @@ fn run_player() {
                 Some("doga-thumb") => {
                     if let Some(r) = thumbs::Req::parse(&args) {
                         let _ = thumbs.send(r);
+                    }
+                }
+                Some("doga-poster") => {
+                    if let Some(r) = posters::Req::parse(&args) {
+                        let _ = posters.send(r);
                     }
                 }
                 _ => {}

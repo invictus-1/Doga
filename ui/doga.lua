@@ -45,6 +45,7 @@ local st = {
 local settings_path = OPT.datadir ~= '' and utils.join_path(OPT.datadir, 'settings.json') or nil
 local recent_path = OPT.datadir ~= '' and utils.join_path(OPT.datadir, 'recent.json') or nil
 local recent = {}
+local CW = {} -- the playlist panel's Continue watching tab (filled in further down)
 -- recent by path. The index is rebuilt when the list changed: every change either swaps the
 -- table (load) or puts a new entry first (remember).
 local recent_for
@@ -104,6 +105,8 @@ local cfg = {
   series_tracks = true,   -- the audio and subtitles picked in one episode follow to the rest
   ontop = false,          -- keep the window above other windows
   recents = true,         -- list Continue and Recent on the start screen
+  cw_backup = true,       -- Continue watching: Clear keeps a copy first (under Previous)
+  cw_sort = 'recent',     -- Continue watching order: 'recent' | 'name' | 'left'
   keys = {},              -- hotkey overrides: action id → key ('' = unassigned)
 }
 
@@ -116,6 +119,7 @@ local function save_settings()
     volume_mode = cfg.volume_mode, audio_device = cfg.audio_device, keys = cfg.keys,
     audio_delay = cfg.audio_delay, display = cfg.display,
     series_tracks = cfg.series_tracks, ontop = cfg.ontop, recents = cfg.recents,
+    cw_backup = cfg.cw_backup, cw_sort = cfg.cw_sort,
   })
 end
 
@@ -875,9 +879,19 @@ local function draw_panel()
   fill(rect(x0, 0, pw, st.h), T.surface1)
   fill(rect(x0, 0, 1 * s, st.h), T.lineStrong)
   zone('panel', x0, 0, pw, st.h)
-  -- head
-  txt(x0 + 16 * s, 24 * s, 'PLAYLIST · ' .. hotkey_label('playlist'), { size = 11, weight = 600, color = T.muted, extra = '\\fsp1.5' })
-  kctx():motif(st.w - 92 * s - 48 * s, 20 * s, 48 * s, 8 * s, T.lineStrong)
+  -- head: the two tabs, the current one underlined
+  local tab = st.tab or 'playlist'
+  local tx = x0 + 16 * s
+  for _, tb in ipairs({ { 'playlist', 'PLAYLIST' }, { 'continue', 'CONTINUE WATCHING' } }) do
+    local on = tab == tb[1]
+    local tw = text_w(tb[2], 11 * s) + 1.5 * #tb[2]
+    local hov = within(tx - 8 * s, 0, tw + 16 * s, TOP_H * s)
+    txt(tx, 24 * s, tb[2], { size = 11, weight = 600, color = (on or hov) and T.ink or T.muted, extra = '\\fsp1.5' })
+    if on then fill(rect(tx, TOP_H * s - 2 * s, tw, 2 * s), T.accent) end
+    zone('pl-tab', tx - 8 * s, 0, tw + 16 * s, TOP_H * s, { tab = tb[1] })
+    tx = tx + tw + 24 * s
+  end
+  if tx + 48 * s < st.w - 92 * s then kctx():motif(st.w - 92 * s - 48 * s, 20 * s, 48 * s, 8 * s, T.lineStrong) end
   ibtn('pl-open', st.w - 84 * s, 4 * s, 'open')
   ibtn('pl-close', st.w - 44 * s, 4 * s, 'close')
   fill(rect(x0, TOP_H * s, pw, 1 * s), T.line)
@@ -887,7 +901,9 @@ local function draw_panel()
   fill(rect(x0, fy, pw, 1 * s), T.line)
   local n = #st.playlist
   local line1, line2
-  if st.series and st.series.name and st.series.matched and st.series.matched > 1 and st.series.matched == n then
+  if tab == 'continue' then
+    line1, line2 = CW.footer()
+  elseif st.series and st.series.name and st.series.matched and st.series.matched > 1 and st.series.matched == n then
     line1 = string.format('Auto · %d of %d videos in this folder', st.series.matched, st.series.total or st.series.matched)
     line2 = 'Series: ' .. st.series.name
   else
@@ -896,6 +912,7 @@ local function draw_panel()
   end
   txt(x0 + 16 * s, fy + 18 * s, fit(line1, pw - 32 * s, 12 * s), { size = 12, color = T.muted })
   txt(x0 + 16 * s, fy + 37 * s, fit(line2, pw - 32 * s, 12 * s), { size = 12, color = T.ink })
+  if tab == 'continue' then CW.draw(x0, pw, TOP_H * s, fy); return end
   -- rows
   local ly, lh = TOP_H * s + 4 * s, fy - TOP_H * s - 8 * s
   local rh = ROW_H * s
@@ -1550,6 +1567,7 @@ local function draw_context_menu()
     ry = ry + rh
   end
   cm_panel(cm.items, x, y, w, 1)
+  st.cm_rects = { { x, y, w, h } }
   if cm.sub then
     local sw = CM_SUB_W * s
     local sh = cm_height(cm.sub.items)
@@ -1557,6 +1575,7 @@ local function draw_context_menu()
     if sx + sw > st.w - 4 * s then sx = x - sw + 4 * s end
     local sx2, sy = cm_place(sx, cm.sub.y - CM_PAD * s, sw, sh)
     cm_panel(cm.sub.items, sx2, sy, sw, 2)
+    st.cm_rects[2] = { sx2, sy, sw, sh }
   end
 end
 
@@ -1847,6 +1866,7 @@ local function section_rows(name)
       rows[#rows + 1] = row('Clear recent files', 'Empties the start screen · watched marks and resume positions stay',
         function(rx, y, clip) sbutton(clip, 'set-clear-recent', rx, y, 'Clear') end, 64, 110)
     end
+    rows[#rows + 1] = row('Back up Continue watching before Clear', 'Clear keeps a copy under Previous · Off clears it for good', onoff('cw_backup'))
     rows[#rows + 1] = row('Window', 'Opens where and how you left it: on the same monitor, maximized or fitted to the video. Fullscreen is always manual.', nil)
     rows[#rows + 1] = row('Always on top', 'Keeps Dōga above other windows · ' .. hotkey_label('ontop'), onoff('ontop'))
     rows[#rows + 1] = row('Screenshots', hotkey_label('shot') .. ' saves the exact frame · ' .. hotkey_label('shot-subs') .. ' includes subtitles · Pictures › Dōga',
@@ -2065,6 +2085,7 @@ render = function()
   if st.w <= 0 or st.h <= 0 then return end
   bench.renders = bench.renders + 1
   out, zones = {}, {}
+  st.cm_rects = nil
   local now = mp.get_time()
   local vw = st.w - panel_w()
   if st.idle or st.demo_idle then
@@ -2099,6 +2120,7 @@ render = function()
     bench.pushes = bench.pushes + 1
   end
   thumb_sync()
+  CW.sync()
 end
 
 local pending = false
@@ -2128,8 +2150,9 @@ end)
 local function remember()
   local g = st.last_good
   if not g or not g.path or not g.dur or g.dur <= 0 then return end
-  local entry = { path = g.path, pos = g.pos, dur = g.dur, watched = g.pos / g.dur > 0.92 }
+  local entry = { path = g.path, pos = g.pos, dur = g.dur, watched = g.pos / g.dur > 0.92, t = os.time() }
   if g.path == st.hide_path then entry.hide = true end
+  if g.path == st.cw_hide_path then entry.cw_hide = true end
   for i = #recent, 1, -1 do if recent[i].path == g.path then table.remove(recent, i) end end
   table.insert(recent, 1, entry)
   while #recent > 200 do table.remove(recent) end -- the start screen lists five; the rest feed the watched marks
@@ -2145,14 +2168,14 @@ function st.clear_recent()
   st.hide_path = st.last_good and st.last_good.path -- the file open (or just closed) stays out too
   write_json(recent_path, recent)
 end
-mp.register_event('file-loaded', function() st.hide_path = nil end)
+mp.register_event('file-loaded', function() st.hide_path, st.cw_hide_path = nil, nil end)
 
 -- The start screen's Continue row. Stopped partway: that file. Finished it: the host looks
 -- up what follows it in its series (answer in doga-next) and the first one not yet watched is offered.
 local function refresh_continue()
   st.cont = nil
   local r0 = recent[1]
-  if not r0 or not r0.path or r0.hide then return end
+  if not r0 or not r0.path or r0.hide or r0.cw_hide then return end
   if not r0.watched then
     if (r0.pos or 0) > 5 then st.cont = { path = r0.path, pos = r0.pos, dur = r0.dur } end
     return
@@ -2172,6 +2195,295 @@ mp.register_script_message('doga-next', function(j)
   end
   request_render()
 end)
+
+---------------------------------------------------------------------------
+-- Continue watching: the playlist panel's second tab. Every file stopped partway (from the
+-- recent list), with a poster of where it was left, sortable. Clear empties it and, unless
+-- Settings says otherwise, keeps a copy first that "Previous" can bring back.
+-- Clearing only flags the entries (cw_hide): they still carry the watched marks and resume
+-- positions, and a file opened again is listed again.
+---------------------------------------------------------------------------
+do
+  local backups_path = OPT.datadir ~= '' and utils.join_path(OPT.datadir, 'continue-backups.json') or nil
+  local backups -- newest first: { t = os.time(), items = { { path, pos, dur, t } } }
+  local KEEP = 10 -- backups kept; the oldest goes when there are more
+  local ROW, PW, PH = 72, 96, 54 -- row height and poster box, css px
+  local ID0, IDS = 20, 40 -- overlay ids for posters (the scrub preview uses 7)
+  local SORTS = { { 'recent', 'Last watched' }, { 'name', 'Name' }, { 'left', 'Time left' } }
+  local posters = {} -- by path: { t, w, h, asked, addr }
+  local shown = {}   -- overlay id → what it shows
+  CW.ROW, CW.scroll, CW.gen = ROW, 0, 0
+
+  function CW.backups()
+    if not backups then
+      local b = read_json(backups_path)
+      backups = type(b) == 'table' and b or {}
+    end
+    return backups
+  end
+
+  local function in_progress(e)
+    return type(e) == 'table' and e.path and not e.watched and not e.cw_hide and (e.pos or 0) > 5 and (e.dur or 0) > 0
+  end
+  -- names compare with their numbers as numbers: "Ep 2" before "Ep 10"
+  local function name_key(path)
+    return (clean_title(path):lower():gsub('%d+', function(d) return #d < 12 and (('0'):rep(12 - #d) .. d) or d end))
+  end
+
+  local memo = {}
+  function CW.list()
+    if memo.of == recent and memo.head == recent[1] and memo.n == #recent and memo.sort == cfg.cw_sort and memo.gen == CW.gen then
+      return memo.items
+    end
+    local items = {}
+    for _, e in ipairs(recent) do if in_progress(e) then items[#items + 1] = e end end
+    if cfg.cw_sort == 'name' then
+      local k = {}
+      for _, e in ipairs(items) do k[e] = name_key(e.path) end
+      table.sort(items, function(a, b) return k[a] < k[b] end)
+    elseif cfg.cw_sort == 'left' then
+      table.sort(items, function(a, b) return (a.dur - a.pos) < (b.dur - b.pos) end)
+    end -- 'recent': the list is newest first already
+    memo = { of = recent, head = recent[1], n = #recent, sort = cfg.cw_sort, gen = CW.gen, items = items }
+    return items
+  end
+
+  function CW.clear()
+    local items = {}
+    for _, e in ipairs(recent) do if in_progress(e) then items[#items + 1] = e end end
+    if #items == 0 then return end
+    if cfg.cw_backup then
+      local copy = {}
+      for _, e in ipairs(items) do copy[#copy + 1] = { path = e.path, pos = e.pos, dur = e.dur, t = e.t } end
+      local b = CW.backups()
+      table.insert(b, 1, { t = os.time(), items = copy })
+      while #b > KEEP do table.remove(b) end
+      write_json(backups_path, b)
+    end
+    for _, e in ipairs(items) do e.cw_hide = true end
+    st.cw_hide_path = st.last_good and st.last_good.path -- the file open (or just closed) stays out too
+    CW.gen, CW.scroll = CW.gen + 1, 0
+    write_json(recent_path, recent)
+    refresh_continue()
+    osd('list', 'Continue watching', 'cleared', cfg.cw_backup and 'a copy is under Previous' or nil)
+  end
+
+  -- Puts a backup's files back in the list and drops the backup. Files still in the recent list
+  -- are just unflagged (a file finished since stays out by itself); ones that fell off its end
+  -- go back in by when they were watched, kept off the start screen.
+  function CW.restore(i)
+    local b = CW.backups()[i]
+    if not b then return end
+    local list, fresh, n = {}, {}, 0
+    for k, e in ipairs(recent) do list[k] = e end
+    for _, it in ipairs(b.items or {}) do
+      if type(it) == 'table' and type(it.path) == 'string' then
+        if it.path == st.cw_hide_path then st.cw_hide_path = nil end -- back for good, also once saved again
+        local rec = recent_for(it.path)
+        if rec then
+          if rec.cw_hide then rec.cw_hide = nil; n = n + 1 end
+        elseif (it.pos or 0) > 5 and (it.dur or 0) > 0 then
+          local e = { path = it.path, pos = it.pos, dur = it.dur, t = it.t, watched = false, hide = true }
+          local at = #list + 1
+          if it.t then
+            for k, o in ipairs(list) do if o.t and o.t < it.t then at = k; break end end
+          end
+          table.insert(list, at, e)
+          fresh[e], n = true, n + 1
+        end
+      end
+    end
+    local k = #list
+    while #list > 200 and k > 0 do
+      if not fresh[list[k]] then table.remove(list, k) end
+      k = k - 1
+    end
+    recent = list -- a new table, so the lookup by path is rebuilt
+    table.remove(CW.backups(), i)
+    write_json(backups_path, CW.backups())
+    write_json(recent_path, recent)
+    CW.gen, CW.scroll = CW.gen + 1, 0
+    refresh_continue()
+    osd('list', 'Continue watching', n == 1 and '1 video back' or (n .. ' videos back'))
+  end
+
+  function CW.forget(i)
+    table.remove(CW.backups(), i)
+    write_json(backups_path, CW.backups())
+  end
+
+  -- The toolbar's menus, opened under the link that was clicked.
+  function CW.menu(kind, z)
+    local s = st.s
+    local items
+    if kind == 'sort' then
+      items = { { header = 'SORT BY' } }
+      for _, o in ipairs(SORTS) do
+        items[#items + 1] = { label = o[2], radio = true, on = cfg.cw_sort == o[1], fn = function()
+          cfg.cw_sort, CW.scroll = o[1], 0
+          save_settings()
+        end }
+      end
+    elseif kind == 'clear' then
+      local n = #CW.list()
+      items = {
+        { header = 'CLEAR CONTINUE WATCHING?' },
+        { label = cfg.cw_backup and 'A copy goes to Previous' or 'This can’t be undone', disabled = true },
+        { sep = true },
+        { label = n == 1 and 'Clear 1 video' or ('Clear all ' .. n .. ' videos'), fn = CW.clear },
+        { label = 'Cancel', fn = function() end },
+      }
+    else
+      items = { { header = 'PREVIOUS LISTS' } }
+      for i, b in ipairs(CW.backups()) do
+        local n = type(b.items) == 'table' and #b.items or 0
+        items[#items + 1] = {
+          label = os.date('%d %b, %H:%M', b.t or 0), value = n == 1 and '1 video' or (n .. ' videos'),
+          sub = function()
+            return { { label = 'Restore', fn = function() CW.restore(i) end }, { label = 'Delete', fn = function() CW.forget(i) end } }
+          end,
+        }
+      end
+    end
+    st.cm = { x = z.x + z.w - CM_W * s, y = z.y + z.h, cw = kind, items = items }
+    if kind == 'sort' then st.cm.x = z.x end
+  end
+
+  -- A poster for this file near this moment: asked for once per file and size (again when the
+  -- moment moved on by more than a minute, except for the file playing now).
+  function CW.poster(path, pos, w, h, cur)
+    local p = posters[path]
+    local t = math.floor(pos or 0)
+    if not p or p.w ~= w or p.h ~= h or (not cur and math.abs(p.t - t) > 60) then
+      local keep = p and p.w == w and p.h == h and p.addr or nil
+      p = { t = t, w = w, h = h, addr = keep }
+      posters[path] = p
+      mp.commandv('script-message-to', 'main', 'doga-poster', path, tostring(t), tostring(w), tostring(h))
+    end
+    return p.addr and p or nil
+  end
+  mp.register_script_message('doga-poster-ready', function(path, t, addr, w, h)
+    local p = posters[path]
+    if not p or p.t ~= tonumber(t) then return end
+    if addr ~= '0' and tonumber(w) == p.w and tonumber(h) == p.h then p.addr = addr end
+    request_render()
+  end)
+
+  -- small-caps link in the toolbar, right edge at rx; returns its left edge
+  local function link(id, rx, cy, label)
+    local s = st.s
+    local w = text_w(label, 11 * s) + 1.5 * #label
+    local zx, zy, zw, zh = rx - w - 6 * s, cy - 14 * s, w + 12 * s, 28 * s
+    local on = within(zx, zy, zw, zh) or (st.cm and st.cm.cw == id:sub(4))
+    txt(rx, cy, label, { size = 11, weight = 600, an = 6, color = on and T.ink or T.muted, extra = '\\fsp1.5' })
+    zone(id, zx, zy, zw, zh)
+    return rx - w
+  end
+
+  function CW.footer()
+    local n = #CW.list()
+    if n == 0 then return 'Nothing to continue', 'Files you stop partway show up here' end
+    return (n == 1 and '1 video' or (n .. ' videos')) .. ' stopped partway', 'Click one to pick up where you left off'
+  end
+
+  function CW.draw(x0, pw, top, bottom)
+    local s = st.s
+    local items = CW.list()
+    local n = #items
+    -- toolbar: sort on the left; Previous and Clear on the right, each only when it has something to do
+    local cy = top + 20 * s
+    do
+      local cur = SORTS[1][2]
+      for _, o in ipairs(SORTS) do if o[1] == cfg.cw_sort then cur = o[2] end end
+      local label = cur:upper()
+      local lx = x0 + 16 * s
+      local w1 = text_w('SORT', 11 * s) + 6
+      local w2 = text_w(label, 11 * s) + 1.5 * #label
+      local zx, zy, zw, zh = lx - 6 * s, cy - 14 * s, w1 + 8 * s + w2 + 26 * s, 28 * s
+      local on = within(zx, zy, zw, zh) or (st.cm and st.cm.cw == 'sort')
+      txt(lx, cy, 'SORT', { size = 11, weight = 600, color = T.muted, extra = '\\fsp1.5' })
+      txt(lx + w1 + 8 * s, cy, label, { size = 11, weight = 600, color = on and T.accentBright or T.ink, extra = '\\fsp1.5' })
+      local cx = lx + w1 + 8 * s + w2 + 10 * s
+      stroke(poly({ cx - 3.5 * s, cy - 1.5 * s, cx, cy + 2 * s, cx + 3.5 * s, cy - 1.5 * s, cx, cy + 2 * s }), on and T.accentBright or T.muted, 1.5 * s)
+      zone('cw-sort', zx, zy, zw, zh)
+    end
+    local rx = x0 + pw - 16 * s
+    if n > 0 then rx = link('cw-clear', rx, cy, 'CLEAR') - 20 * s end
+    if #CW.backups() > 0 then link('cw-prev', rx, cy, 'PREVIOUS') end
+    fill(rect(x0, top + 40 * s, pw, 1 * s), T.line)
+    -- rows
+    local ly = top + 44 * s
+    local lh = bottom - ly - 4 * s
+    local rh = ROW * s
+    CW.scroll = math.max(0, math.min(CW.scroll, math.max(0, n * rh - lh)))
+    local clip = string.format('\\clip(%d,%d,%d,%d)', r(x0), r(ly), r(st.w), r(ly + lh))
+    local bw, bh = r(PW * s / 2) * 2, r(PH * s / 2) * 2
+    local want = {}
+    local first = math.max(1, math.floor(CW.scroll / rh))
+    local last = math.min(n, math.ceil((CW.scroll + lh) / rh) + 1)
+    for i = first, last do
+      local e = items[i]
+      local y = ly + (i - 1) * rh - CW.scroll
+      local vy0, vy1 = math.max(y, ly), math.min(y + rh, ly + lh)
+      if vy1 > vy0 then
+        local cur = not st.idle and e.path == st.path
+        local pos, dur = e.pos, e.dur
+        if cur and st.dur > 0 then pos, dur = st.pos, st.dur end
+        local hov = not st.cm and within(x0, vy0, pw, vy1 - vy0)
+        if hov or cur then fill(rect(x0 + 1 * s, y, pw - 1 * s, rh), T.surface2, 0, clip) end
+        -- the poster's place (and what shows until it arrives), and how far it got under it
+        local px, py = r(x0 + 16 * s), r(y + 7 * s)
+        fill(rect(px, py, bw, bh), T.surface0, 0, clip)
+        local part = dur > 0 and math.max(0, math.min(1, pos / dur)) or 0
+        fill(rect(px, py + bh + 3 * s, bw, 2 * s), T.line, 0, clip)
+        fill(rect(px, py + bh + 3 * s, r(bw * part), 2 * s), T.accent, 0, clip)
+        local tx = px + bw + 12 * s
+        local tw = x0 + pw - 16 * s - tx
+        txt(tx, y + 18 * s, fit(clean_title(e.path), tw, 14 * s), { size = 14, extra = clip })
+        txt(tx, y + 38 * s, (cur and 'NOW · ' or '') .. short_time(pos) .. ' / ' .. short_time(dur),
+          { size = 12, mono = true, weight = 500, color = cur and T.accent or T.muted, extra = clip })
+        txt(tx, y + 56 * s, short_time(dur - pos) .. ' left', { size = 12, color = T.muted, extra = clip })
+        zone('cw-row', x0, vy0, pw, vy1 - vy0, { path = e.path })
+        local p = CW.poster(e.path, pos, bw, bh, cur)
+        if p then
+          local cut0 = math.max(0, r(ly) - py)
+          local vh = math.min(bh, r(ly + lh) - py) - cut0
+          if vh > 0 then want[#want + 1] = { addr = p.addr, w = bw, x = px, y = py + cut0, top = cut0, vh = vh } end
+        end
+      end
+    end
+    CW.want = want
+  end
+
+  -- After each render: posters are bitmaps over the drawing, so the ones a menu or Settings
+  -- would cover are taken down, and ids no longer needed are freed.
+  function CW.sync()
+    local want = CW.want
+    CW.want = nil
+    local used = {}
+    if want and not st.settings then
+      for k, p in ipairs(want) do
+        if k > IDS then break end
+        local covered = false
+        for _, c in ipairs(st.cm_rects or {}) do
+          if p.x < c[1] + c[3] and p.x + p.w > c[1] and p.y < c[2] + c[4] and p.y + p.vh > c[2] then covered = true end
+        end
+        if not covered then
+          local id = ID0 + k - 1
+          local sig = p.addr .. '@' .. p.x .. ',' .. p.y .. ',' .. p.top .. ',' .. p.vh
+          used[id] = true
+          if shown[id] ~= sig then
+            mp.command_native({ 'overlay-add', id, p.x, p.y, '&' .. p.addr, p.top * p.w * 4, 'bgra', p.w, p.vh, p.w * 4 })
+            shown[id] = sig
+          end
+        end
+      end
+    end
+    for id in pairs(shown) do
+      if not used[id] then mp.command_native({ 'overlay-remove', id }); shown[id] = nil end
+    end
+  end
+end
 
 ---------------------------------------------------------------------------
 -- Input
@@ -2228,6 +2540,13 @@ local ACTIONS = {
   end,
   recent = function(z) mp.commandv('loadfile', z.data.path, 'replace') end,
   ['recent-clear'] = function() st.clear_recent() end,
+  ['pl-tab'] = function(z) st.tab = z.data.tab end,
+  ['cw-row'] = function(z)
+    if st.idle or z.data.path ~= st.path then mp.commandv('loadfile', z.data.path, 'replace') end
+  end,
+  ['cw-sort'] = function(z) CW.menu('sort', z) end,
+  ['cw-clear'] = function(z) CW.menu('clear', z) end,
+  ['cw-prev'] = function(z) CW.menu('prev', z) end,
   update = function() start_update() end,
   ['start-over'] = function() st.resumed = nil; mp.commandv('seek', 0, 'absolute') end,
   ['error-card'] = function() st.error = nil end,
@@ -2344,11 +2663,13 @@ mp.add_key_binding(nil, 'vol-up', function() change_volume(5) end, { repeatable 
 mp.add_key_binding(nil, 'vol-down', function() change_volume(-5) end, { repeatable = true })
 mp.add_key_binding(nil, 'wheel-up', function()
   if st.settings then st.settings.scroll = (st.settings.scroll or 0) - 56 * st.s; render(); return end
-  if in_panel() then st.scroll = st.scroll - ROW_H * st.s; render() else change_volume(5) end
+  if in_panel() and st.tab == 'continue' then CW.scroll = CW.scroll - CW.ROW * st.s; render()
+  elseif in_panel() then st.scroll = st.scroll - ROW_H * st.s; render() else change_volume(5) end
 end, { repeatable = true })
 mp.add_key_binding(nil, 'wheel-down', function()
   if st.settings then st.settings.scroll = (st.settings.scroll or 0) + 56 * st.s; render(); return end
-  if in_panel() then st.scroll = st.scroll + ROW_H * st.s; render() else change_volume(-5) end
+  if in_panel() and st.tab == 'continue' then CW.scroll = CW.scroll + CW.ROW * st.s; render()
+  elseif in_panel() then st.scroll = st.scroll + ROW_H * st.s; render() else change_volume(-5) end
 end, { repeatable = true })
 mp.add_key_binding(nil, 'mute', function()
   mp.commandv('cycle', 'mute')
@@ -2551,7 +2872,7 @@ mp.register_script_message('doga-drop', function(x, y, ...)
     end
     return
   end
-  if st.panel and x >= st.w - panel_w() and #st.playlist > 0 then
+  if st.panel and st.tab ~= 'continue' and x >= st.w - panel_w() and #st.playlist > 0 then
     st.mx, st.my = x, y
     local slot = row_slot()
     for i, f in ipairs(media) do mp.commandv('loadfile', f, 'insert-at', tostring(slot - 2 + i)) end
