@@ -1622,7 +1622,7 @@ end
 
 -- Every remappable action, with its default key (from ui/input.conf) and what it runs.
 local HOTKEYS = {
-  { id = 'pause', label = 'Play / pause', key = 'SPACE', cmd = 'no-osd cycle pause' },
+  { id = 'pause', label = 'Play / pause', key = 'SPACE', cmd = 'script-binding doga/play-pause' },
   { id = 'audio', label = 'Next audio track', key = 'b', cmd = 'script-binding doga/cycle-audio' },
   { id = 'audio-back', label = 'Previous audio track', key = 'B', cmd = 'script-binding doga/cycle-audio-back' },
   { id = 'sub', label = 'Next subtitle track', key = 'v', cmd = 'script-binding doga/cycle-sub' },
@@ -2514,7 +2514,7 @@ local function row_slot()
 end
 
 local ACTIONS = {
-  play = function() mp.commandv('cycle', 'pause') end,
+  play = function() st.play_pause() end,
   back = function() mp.commandv('no-osd', 'seek', -cfg.seek_step) end,
   fwd = function() mp.commandv('no-osd', 'seek', cfg.seek_step) end,
   mute = function() mp.commandv('cycle', 'mute') end,
@@ -2586,7 +2586,7 @@ local function on_left(e)
       st.menu = nil; render(); return
     end
     if not z then
-      if not st.idle then mp.commandv('cycle', 'pause') end
+      if not st.idle then st.play_pause() end
       return
     end
     if z.id == 'seek' and st.dur > 0 then
@@ -2676,6 +2676,20 @@ mp.add_key_binding(nil, 'mute', function()
   local m = mp.get_property_bool('mute')
   osd(m and 'mute' or 'vol', 'Volume', m and 'muted' or nil, nil, (not m) and { bar = r(mp.get_property_number('volume') or 100) } or { off = true })
 end)
+-- Play / pause. A video that has played to its end stays open on its last frame, paused;
+-- playing it then starts it over from the beginning.
+function st.play_pause(only_play)
+  if (only_play or mp.get_property_bool('pause')) and mp.get_property_bool('eof-reached') then
+    mp.commandv('no-osd', 'seek', 0, 'absolute')
+    mp.set_property_bool('pause', false)
+  elseif only_play then
+    mp.set_property_bool('pause', false)
+  else
+    mp.commandv('no-osd', 'cycle', 'pause')
+  end
+end
+mp.add_key_binding(nil, 'play-pause', function() st.play_pause() end)
+mp.add_key_binding(nil, 'play', function() st.play_pause(true) end)
 mp.add_key_binding(nil, 'toggle-playlist', function()
   st.panel = not st.panel; apply_margin(); save_settings(); render()
 end)

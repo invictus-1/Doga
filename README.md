@@ -32,7 +32,7 @@ The video in these pictures is a set of test clips drawn for this page.
 | --- | --- |
 | **B** / Shift+B | next / previous audio track |
 | **V** / Shift+V | next / previous subtitle track (Off is part of the cycle) |
-| Space, click | play / pause |
+| Space, click | play / pause (a video that has ended plays again from the start) |
 | Right-click | menu: open, audio, subtitles (+ delay), video (aspect, rotate, deinterlace, screenshot, copy frame), speed, theme, playlist, info, fullscreen, always on top |
 | ← / → | 5 seconds back / forward |
 | Shift+← / → or , / . | one frame |
